@@ -401,6 +401,12 @@ func TestMarkedTCPAndDNSEgress(t *testing.T) {
 		runCommand(t, "ip", "-n", item[0], "link", "set", "lo", "up")
 		runCommand(t, "ip", "-n", item[0], "link", "set", item[1], "up")
 	}
+	// GitHub-hosted runners enable reverse-path filtering by default. This test
+	// deliberately removes the main-table route and keeps it only in a marked
+	// policy table, so rp_filter would otherwise drop the valid reply before
+	// the socket can receive it.
+	runCommand(t, "ip", "netns", "exec", dut, "sysctl", "-q", "-w", "net.ipv4.conf.all.rp_filter=0")
+	runCommand(t, "ip", "netns", "exec", dut, "sysctl", "-q", "-w", "net.ipv4.conf.veth-dut.rp_filter=0")
 	// Remove the main-table connected route. Only a socket carrying mark 24680
 	// can reach the peer through the dedicated policy table.
 	runCommand(t, "ip", "-n", dut, "route", "del", "198.18.0.0/30", "dev", "veth-dut")
