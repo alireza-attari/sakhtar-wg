@@ -5,6 +5,8 @@ versions follow Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-17
+
 ### Added
 
 - Bounded proxy, DNS, lifecycle, host-state ownership, observability, and
@@ -22,6 +24,5 @@ versions follow Semantic Versioning.
 - Added CI definitions for race tests, vulnerability and container scans,
   secret scanning, CodeQL, checksums, SBOMs, signatures, and attestations.
 
-Release maintainers move these entries to `## [X.Y.Z] - YYYY-MM-DD`, add
-operator migration/rollback notes, and leave an empty Unreleased section before
-creating a `vX.Y.Z` tag.
+[Unreleased]: https://github.com/alireza-attari/sakhtar-wg/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/alireza-attari/sakhtar-wg/releases/tag/v0.1.0

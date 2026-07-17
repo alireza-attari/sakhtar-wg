@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use sakhtar-wg in published work, please cite this software."
+title: sakhtar-wg
+type: software
+authors:
+  - family-names: Attari
+    given-names: Alireza
+repository-code: "https://github.com/alireza-attari/sakhtar-wg"
+url: "https://github.com/alireza-attari/sakhtar-wg"
+license: MIT
+version: 0.1.0
+date-released: 2026-07-17

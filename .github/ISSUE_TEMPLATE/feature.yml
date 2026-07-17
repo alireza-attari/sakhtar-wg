@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a focused capability or operator improvement
+title: "[feature] "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Please describe the operator problem first. Do not include production
+        keys, private endpoints, credentials, or other sensitive data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operator problem
+      description: What cannot be done safely or clearly today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior rather than an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Safety and compatibility constraints
+      description: Note routing, ownership, privilege, migration, or rollback concerns.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

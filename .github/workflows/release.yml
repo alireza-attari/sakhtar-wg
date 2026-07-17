@@ -6,23 +6,22 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
-  attestations: write
+  contents: read
 
 env:
   GO_VERSION: "1.26.5"
   GOVULNCHECK_VERSION: "v1.6.0"
 
 jobs:
-  release:
+  build:
+    name: build-and-verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -30,7 +29,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
-          test "$(git describe --tags --exact-match)" = "${GITHUB_REF_NAME}"
+          test "$(git describe --tags --exact-match)" = "$GITHUB_REF_NAME"
           grep -F "## [${GITHUB_REF_NAME#v}]" CHANGELOG.md
       - name: Test, race, and static analysis
         run: |
@@ -44,7 +43,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y iproute2 iptables wireguard-tools
           sudo modprobe wireguard || true
-          sudo -E "$GOROOT/bin/go" test -tags=integration -count=1 -timeout=2m ./...
+          sudo -E "$(command -v go)" test -tags=integration -count=1 -timeout=2m ./...
       - name: Vulnerability gate
         run: |
           GOBIN="$RUNNER_TEMP/bin" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
@@ -79,26 +78,6 @@ jobs:
             sakhtar-wg-linux-amd64.spdx.json sakhtar-wg-linux-arm64.spdx.json \
             BUILD-METADATA.txt LICENSE README.md config.example.yaml sakhtar-wg.service \
             > SHA256SUMS)
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        with:
-          cosign-release: v3.0.6
-      - name: Keyless-sign checksum manifest
-        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
-      - name: Verify checksum signature in the producing workflow
-        run: >-
-          cosign verify-blob
-          --bundle dist/SHA256SUMS.sigstore.json
-          --certificate-identity-regexp="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@.*"
-          --certificate-oidc-issuer=https://token.actions.githubusercontent.com
-          dist/SHA256SUMS
-      - name: Attest binary and SBOM provenance
-        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
-        with:
-          subject-path: |
-            dist/sakhtar-wg-linux-amd64
-            dist/sakhtar-wg-linux-arm64
-            dist/sakhtar-wg-linux-amd64.spdx.json
-            dist/sakhtar-wg-linux-arm64.spdx.json
       - name: Clean-image installation smoke
         run: |
           for IMAGE in debian:13-slim ubuntu:24.04; do
@@ -125,61 +104,125 @@ jobs:
           STATUS=$?
           set -e
           test "$STATUS" -eq 124
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Upload immutable release inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sakhtar-wg-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: publish-release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download verified release inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sakhtar-wg-${{ github.ref_name }}
+          path: dist
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+      - name: Keyless-sign checksum manifest
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+      - name: Verify checksum signature
+        run: >-
+          cosign verify-blob
+          --bundle dist/SHA256SUMS.sigstore.json
+          --certificate-identity-regexp="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@.*"
+          --certificate-oidc-issuer=https://token.actions.githubusercontent.com
+          dist/SHA256SUMS
+      - name: Attest binary and SBOM provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-path: |
+            dist/sakhtar-wg-linux-amd64
+            dist/sakhtar-wg-linux-arm64
+            dist/sakhtar-wg-linux-amd64.spdx.json
+            dist/sakhtar-wg-linux-arm64.spdx.json
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate immutable and convenience image tags
+        id: image_tags
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          MAJOR="${VERSION%%.*}"
+          REMAINDER="${VERSION#*.}"
+          MINOR="${REMAINDER%%.*}"
+          {
+            echo "value<<EOF"
+            echo "ghcr.io/${GITHUB_REPOSITORY}:${GITHUB_REF_NAME}"
+            echo "ghcr.io/${GITHUB_REPOSITORY}:${VERSION}"
+            echo "ghcr.io/${GITHUB_REPOSITORY}:${MAJOR}.${MINOR}"
+            echo "ghcr.io/${GITHUB_REPOSITORY}:${MAJOR}"
+            echo "ghcr.io/${GITHUB_REPOSITORY}:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
       - name: Build and publish multi-architecture container
         id: image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ startsWith(github.ref, 'refs/tags/') }}
-          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          push: true
+          tags: ${{ steps.image_tags.outputs.value }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.title=sakhtar-wg
+            org.opencontainers.image.description=WireGuard policy-routing daemon for Linux
+          provenance: mode=max
+          sbom: true
       - name: Sign container by digest
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           DIGEST: ${{ steps.image.outputs.digest }}
-        run: cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY}:${GITHUB_REF_NAME}@${DIGEST}"
+        run: cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY}@${DIGEST}"
       - name: Attest container provenance
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
       - name: Released container vulnerability gate
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository }}@${{ steps.image.outputs.digest }}
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - name: Upload immutable workflow artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: sakhtar-wg-${{ github.ref_name }}
-          path: dist/
-          if-no-files-found: error
       - name: Verify GitHub attestations
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh attestation verify dist/sakhtar-wg-linux-amd64 --repo "$GITHUB_REPOSITORY"
           gh attestation verify dist/sakhtar-wg-linux-arm64 --repo "$GITHUB_REPOSITORY"
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$GITHUB_REF_NAME" dist/*
-          --verify-tag
-          --title "$GITHUB_REF_NAME"
-          --notes-file <(scripts/release-notes.sh "$GITHUB_REF_NAME")
+        run: |
+          scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "sakhtar-wg ${GITHUB_REF_NAME}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

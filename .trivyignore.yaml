@@ -1,0 +1,10 @@
+misconfigurations:
+  - id: AVD-DS-0002
+    paths:
+      - Dockerfile
+    statement: >-
+      The daemon must run as root inside the container to configure WireGuard,
+      netlink routes, policy rules, sysctls, and iptables. The documented
+      runtime profile drops every capability except NET_ADMIN, enables
+      no-new-privileges, uses a read-only root filesystem, and mounts only
+      dedicated runtime tmpfs paths.

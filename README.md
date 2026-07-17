@@ -1,5 +1,12 @@
 # sakhtar-wg
 
+[![Verification](https://github.com/alireza-attari/sakhtar-wg/actions/workflows/ci.yml/badge.svg)](https://github.com/alireza-attari/sakhtar-wg/actions/workflows/ci.yml)
+[![Security](https://github.com/alireza-attari/sakhtar-wg/actions/workflows/security.yml/badge.svg)](https://github.com/alireza-attari/sakhtar-wg/actions/workflows/security.yml)
+[![Release](https://github.com/alireza-attari/sakhtar-wg/actions/workflows/release.yml/badge.svg)](https://github.com/alireza-attari/sakhtar-wg/actions/workflows/release.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/alireza-attari/sakhtar-wg/badge)](https://scorecard.dev/viewer/?uri=github.com/alireza-attari/sakhtar-wg)
+[![Go Reference](https://pkg.go.dev/badge/github.com/alireza-attari/sakhtar-wg.svg)](https://pkg.go.dev/github.com/alireza-attari/sakhtar-wg)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
+
 sakhtar-wg is a Linux networking daemon for managing multiple kernel WireGuard
 tunnels and routing selected traffic through them. It supports hostname-based
 proxy routing, CIDR-based gateway routing, tunnel health checks, failover groups,
