@@ -1,0 +1,10 @@
+/sakhtar-wg
+/dist/
+config.yaml
+*.local.yaml
+/.tools/
+*.test
+*.prof
+coverage.out
+proxy-load*.json
+/performance-results/

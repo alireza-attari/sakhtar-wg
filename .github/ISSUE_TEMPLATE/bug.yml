@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a reproducible non-security defect
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not report vulnerabilities or include keys/private production data. Follow SECURITY.md instead."
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact and observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Include exact commands and a minimal sanitized config shape.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version metadata
+      description: Output of sakhtar-wg version -json
+    validations:
+      required: true
+  - type: textarea
+    id: platform
+    attributes:
+      label: Linux/kernel/architecture and enabled features
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted logs, status, metrics, or plan

@@ -1,0 +1,13 @@
+{
+  "schema": "sakhtar-wg-performance-gates/v1",
+  "benchmark_regression_gate": {
+    "enabled": false,
+    "reason": "Enable only after an approved Linux reference-host baseline has at least eight samples and a recorded noise band."
+  },
+  "invariant_gates": {
+    "goroutine_growth_after_churn": 0,
+    "fd_growth_after_churn": 0,
+    "successful_connection_interruptions_on_no_listener_reload": 0,
+    "cache_entries_must_not_exceed_configured_capacity": true
+  }
+}

@@ -1,0 +1,185 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+env:
+  GO_VERSION: "1.26.5"
+  GOVULNCHECK_VERSION: "v1.6.0"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Verify tag and changelog
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          printf '%s\n' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          test "$(git describe --tags --exact-match)" = "${GITHUB_REF_NAME}"
+          grep -F "## [${GITHUB_REF_NAME#v}]" CHANGELOG.md
+      - name: Test, race, and static analysis
+        run: |
+          go mod verify
+          go test ./...
+          go test -race ./...
+          go vet ./...
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+      - name: Privileged disposable namespace gate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 iptables wireguard-tools
+          sudo modprobe wireguard || true
+          sudo -E "$GOROOT/bin/go" test -tags=integration -count=1 -timeout=2m ./...
+      - name: Vulnerability gate
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$RUNNER_TEMP/bin/govulncheck" ./...
+      - name: Reproducible release binaries
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          scripts/build-release.sh dist
+          VERIFY_REPRODUCIBLE=1 scripts/verify-release.sh dist
+          cp LICENSE README.md config.example.yaml sakhtar-wg.service dist/
+      - name: AMD64 SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          file: dist/sakhtar-wg-linux-amd64
+          format: spdx-json
+          output-file: dist/sakhtar-wg-linux-amd64.spdx.json
+          upload-artifact: false
+      - name: ARM64 SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          file: dist/sakhtar-wg-linux-arm64
+          format: spdx-json
+          output-file: dist/sakhtar-wg-linux-arm64.spdx.json
+          upload-artifact: false
+      - name: Final checksums and SBOM presence
+        run: |
+          test -s dist/sakhtar-wg-linux-amd64.spdx.json
+          test -s dist/sakhtar-wg-linux-arm64.spdx.json
+          (cd dist && shasum -a 256 \
+            sakhtar-wg-linux-amd64 sakhtar-wg-linux-arm64 \
+            sakhtar-wg-linux-amd64.spdx.json sakhtar-wg-linux-arm64.spdx.json \
+            BUILD-METADATA.txt LICENSE README.md config.example.yaml sakhtar-wg.service \
+            > SHA256SUMS)
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+      - name: Keyless-sign checksum manifest
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+      - name: Verify checksum signature in the producing workflow
+        run: >-
+          cosign verify-blob
+          --bundle dist/SHA256SUMS.sigstore.json
+          --certificate-identity-regexp="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@.*"
+          --certificate-oidc-issuer=https://token.actions.githubusercontent.com
+          dist/SHA256SUMS
+      - name: Attest binary and SBOM provenance
+        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
+        with:
+          subject-path: |
+            dist/sakhtar-wg-linux-amd64
+            dist/sakhtar-wg-linux-arm64
+            dist/sakhtar-wg-linux-amd64.spdx.json
+            dist/sakhtar-wg-linux-arm64.spdx.json
+      - name: Clean-image installation smoke
+        run: |
+          for IMAGE in debian:13-slim ubuntu:24.04; do
+            docker run --rm -v "$PWD/dist:/artifacts:ro" "$IMAGE" sh -eu -c '
+              install -m 0755 /artifacts/sakhtar-wg-linux-amd64 /usr/local/bin/sakhtar-wg
+              sakhtar-wg version
+            '
+          done
+          sudo install -m 0755 dist/sakhtar-wg-linux-amd64 /usr/local/bin/sakhtar-wg
+          systemd-analyze verify sakhtar-wg.service
+          docker build --build-arg TARGETARCH=amd64 -t sakhtar-wg:release-smoke .
+          set +e
+          docker run --rm \
+            --network none \
+            --cap-drop ALL --cap-add NET_ADMIN \
+            --security-opt no-new-privileges \
+            --read-only \
+            --tmpfs /run/sakhtar-wg:rw,noexec,nosuid,nodev,mode=0700 \
+            --tmpfs /var/lib/sakhtar-wg:rw,noexec,nosuid,nodev,mode=0700 \
+            -v "$PWD/testdata/release-smoke.yaml:/etc/sakhtar-wg/config.yaml:ro" \
+            --entrypoint timeout \
+            sakhtar-wg:release-smoke \
+            --signal=TERM 5 /usr/local/bin/sakhtar-wg up -c /etc/sakhtar-wg/config.yaml
+          STATUS=$?
+          set -e
+          test "$STATUS" -eq 124
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish multi-architecture container
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+      - name: Sign container by digest
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY}:${GITHUB_REF_NAME}@${DIGEST}"
+      - name: Attest container provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+      - name: Released container vulnerability gate
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}@${{ steps.image.outputs.digest }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Upload immutable workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sakhtar-wg-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error
+      - name: Verify GitHub attestations
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify dist/sakhtar-wg-linux-amd64 --repo "$GITHUB_REPOSITORY"
+          gh attestation verify dist/sakhtar-wg-linux-arm64 --repo "$GITHUB_REPOSITORY"
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --verify-tag
+          --title "$GITHUB_REF_NAME"
+          --notes-file <(scripts/release-notes.sh "$GITHUB_REF_NAME")

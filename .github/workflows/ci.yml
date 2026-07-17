@@ -1,0 +1,108 @@
+name: verification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+  GOVULNCHECK_VERSION: "v1.6.0"
+  STATICCHECK_VERSION: "v0.7.0"
+
+jobs:
+  unit:
+    name: unit-race (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod verify
+      - run: go test ./...
+      - run: go test -race ./...
+      - name: Benchmark compile and invariant smoke
+        run: make benchmark-smoke
+      - name: Proxy overload evidence
+        run: make proxy-load PROXY_LOAD_ARTIFACT="proxy-load-${{ matrix.os }}.json"
+      - name: Upload proxy overload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: proxy-load-${{ matrix.os }}-${{ github.sha }}
+          path: proxy-load-${{ matrix.os }}.json
+          if-no-files-found: error
+
+  linux-build-vet:
+    name: linux-build-vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go vet ./...
+      - run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+      - run: make build-linux
+
+  fuzz-smoke:
+    name: fuzz-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: make fuzz-smoke FUZZ_TIME=10s
+
+  analysis:
+    name: pinned-analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Install pinned tools
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          GOBIN="$RUNNER_TEMP/bin" go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: staticcheck ./...
+      - name: Vulnerability baseline
+        run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 govulncheck -json ./... | tee govulncheck.json
+      - name: Upload vulnerability evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: govulncheck-${{ github.sha }}
+          path: govulncheck.json
+          if-no-files-found: error
+
+  integration:
+    name: privileged-network-namespace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Install namespace dependencies
+        run: sudo apt-get update && sudo apt-get install -y iproute2 iptables wireguard-tools
+      - name: Load WireGuard kernel support
+        run: sudo modprobe wireguard || true # it may already be built into the runner kernel
+      - name: Run disposable namespace suite
+        run: sudo -E "$GOROOT/bin/go" test -tags=integration -count=1 -timeout=2m ./...

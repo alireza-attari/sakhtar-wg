@@ -1,0 +1,12 @@
+title = "sakhtar-wg secret scanning policy"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documented example placeholders are not credentials"
+regexTarget = "match"
+regexes = [
+  '''REPLACE_WITH_PRIVATE_KEY''',
+  '''REPLACE_WITH_PUBLIC_KEY'''
+]

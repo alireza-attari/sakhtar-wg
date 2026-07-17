@@ -1,0 +1,38 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      routine-go:
+        patterns: ["*"]
+        exclude-patterns:
+          - "github.com/vishvananda/netlink"
+          - "github.com/vishvananda/netns"
+          - "golang.org/x/crypto"
+          - "golang.org/x/net"
+          - "golang.org/x/sys"
+          - "golang.zx2c4.com/wireguard*"
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: container

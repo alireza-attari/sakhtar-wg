@@ -1,0 +1,192 @@
+# sakhtar-wg example config.
+#
+# Two example kernel WireGuard tunnels and a proxy that sends selected domains
+# through a failover group. Everything else stays direct.
+#
+# Secrets live only in the deployed /etc/sakhtar-wg/config.yaml (chmod 600) — never
+# commit real keys.
+
+# How often (seconds) route_sources below are re-fetched. Default 21600 (6h).
+route_refresh: 21600
+# How often (seconds) group members' WireGuard handshakes are polled for
+# failover. Default 10. Only matters if `groups` is set.
+health_interval: 10
+
+# Local-only management API. /livez never checks external dependencies;
+# /readyz requires an active generation, required listeners, and drift-free
+# kernel/firewall state. /status is redacted and /metrics has bounded labels.
+# Use unix:/run/sakhtar-wg/management.sock instead of TCP when preferred.
+management:
+  listen: "127.0.0.1:9090"
+  read_header_timeout: 5
+  write_timeout: 10
+  idle_timeout: 30
+  shutdown_timeout: 5
+  max_header_bytes: 16384
+  pprof: false             # explicit opt-in; local management listener only
+
+# Optional active reachability evidence, independent of customer destinations.
+# The request resolves and connects through `via` using that tunnel's SO_MARK.
+# Jitter, timeout, and concurrency bounds prevent outage amplification.
+health_probe:
+  enabled: false
+  endpoint: "https://example.net/generate_204"
+  via: wg0
+  interval: 30
+  timeout: 5
+  jitter_percent: 20
+  max_concurrent: 1
+
+# Add as many tunnels as you like — each is an independent upstream WireGuard
+# provider with its own unique fwmark/table. A proxy rule or an L3 route sends
+# traffic to one by name (wg0/wg1/...) or to a group (see `groups` below).
+tunnels:
+  - name: wg0
+    private_key: "REPLACE_WITH_PRIVATE_KEY"
+    address: 10.200.0.2/32
+    mtu: 1280
+    fwmark: 0x33          # unique, non-zero; also used as the routing table id
+    fwmark_mask: 0xffffffff # exact match; selectors may not overlap
+    rule_priority: 31000  # unique; reserved application range is 31000-31999
+    # Default false. If a same-name interface already exists, startup fails.
+    # Opt in only for an otherwise-empty WireGuard link whose key/peer config
+    # already exactly matches this tunnel; adopted links are never deleted.
+    adopt_existing: false
+    # Static L3 routes are retained even when a remote route source is
+    # unavailable. The ranges below are reserved for documentation.
+    routes:
+      - 192.0.2.0/24
+      - 198.51.100.0/24
+    # Auto-updating route lists, fetched on route_refresh and merged on top of
+    # `routes`. Union feeds both the kernel routes and the :8088 list, so provider
+    # ranges stay current with no hand-editing. A failed fetch keeps the last-good
+    # set (also cached to /var/lib/sakhtar-wg/routes.json across restarts).
+    #   format: cidr-lines    = plain text, one CIDR/IP per line, '#' comments
+    #           ripe-prefixes = RIPEstat announced-prefixes JSON (data.prefixes[])
+    #   via:    wg0           = fetch through the tunnel
+    #           direct        = fetch over the normal WAN
+    # IPv6 entries in a source are skipped (the L3 + pfSense chain is IPv4).
+    route_sources:
+      - name: provider-primary
+        url: "https://routes.example.net/primary.txt"
+        format: cidr-lines
+        via: wg0
+      - name: provider-asn
+        url: "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS64496"
+        format: ripe-prefixes
+        via: direct
+    peer:
+      public_key: "REPLACE_WITH_PEER_PUBLIC_KEY"
+      endpoint: vpn-primary.example.net:51820
+      allowed_ips: [0.0.0.0/0]
+      keepalive: 25
+
+  # A second, independent provider. Give it its own fwmark/table. You can route
+  # some domains here and others to wg0, or pool both under a group (below).
+  - name: wg1
+    private_key: "REPLACE_WITH_PRIVATE_KEY_2"
+    address: 10.201.0.2/32
+    mtu: 1280
+    fwmark: 0x34
+    rule_priority: 31001
+    peer:
+      public_key: "REPLACE_WITH_PEER_PUBLIC_KEY_2"
+      endpoint: vpn-backup.example.net:51820
+      allowed_ips: [0.0.0.0/0]
+      keepalive: 25
+
+# Groups pool tunnels behind one name for automatic failover. A rule that routes
+# to `bypass` uses wg0 while its handshake is fresh, and fails over to wg1 within
+# one health_interval if wg0 goes stale — no reload, no per-connection cost.
+# Members are tried in order (primary first).
+groups:
+  - name: bypass
+    members: [wg0, wg1]
+    healthy_after: 180    # a handshake younger than this counts as up; 0 => 180
+
+proxy:
+  https_listen: ":443"
+  http_listen: ":80"
+  # REQUIRED for wildcard or non-loopback listeners. Source authorization is
+  # checked immediately after accept, before TLS/HTTP parsing or DNS. Enumerate
+  # the real client networks; an empty ACL never means allow-all.
+  allowed_source_cidrs: ["10.10.0.0/24"]
+  # Bounds include pending ClientHello/HTTP parsing, resolution+dial work, and
+  # established streams. max_connections_per_source: 0 disables only the
+  # per-source sub-limit; the global limit always applies.
+  max_connections: 1024
+  max_connections_per_source: 64
+  handshake_timeout: 5
+  default: direct         # unmatched hosts go out the normal WAN
+  dial_timeout: 10        # one total deadline for resolution + all IP dials
+  idle_timeout: 0         # optional inactivity timeout; 0 keeps streams open
+  shutdown_grace: 10
+  max_client_hello_bytes: 65536
+  max_http_header_bytes: 65536
+  # net.Resolver does not expose authoritative record TTLs. dns_cache_ttl is an
+  # explicitly local positive-cache TTL, clamped by the min/max policy below.
+  dns_cache_ttl: 300
+  # Positive and negative entries have independent hard capacities. Random
+  # subdomains cannot grow either class or the number of in-flight resolutions
+  # beyond these limits.
+  dns_positive_capacity: 4096
+  dns_negative_capacity: 1024
+  dns_max_pending: 128
+  dns_min_positive_ttl: 5
+  dns_max_positive_ttl: 300
+  dns_negative_ttl: 20
+  dns_transient_failure_ttl: 2
+  # "transient" serves a last-good positive only after a resolver transport
+  # error/timeout and only within this window. NXDOMAIN/NODATA always replace it.
+  # Use "never" to disable stale service.
+  dns_stale_policy: transient
+  dns_stale_window: 3600
+  dns_resolver_timeout: 5
+  # Upstream DNS for resolving a tunnelled backend's real IP, queried through the
+  # tunnel. Must NOT be the AdGuard that rewrites these domains to this proxy, or
+  # the proxy would dial itself.
+  resolver: 1.1.1.1:53
+  # All policy-allowed A/AAAA results participate. The starting address rotates
+  # per request and at most this many literal-IP connects share dial_timeout.
+  address_family_strategy: interleave  # interleave | ipv4_first | ipv6_first
+  connect_attempt_cap: 4
+  # Loopback, link-local, multicast, unspecified, documentation, benchmark,
+  # daemon/self, and private destinations are denied by default. Only private or
+  # otherwise default-denied services intentionally listed for the actual
+  # egress are exceptions; listener/self, unspecified, and multicast addresses
+  # remain hard-denied. Public destinations need no allow entry.
+  destination_policy:
+    direct_allow_cidrs: []
+    tunnel_allow_cidrs:
+      wg0: []
+      wg1: []
+  # Each rule maps domain suffixes to an egress: a tunnel name, a group name, or
+  # "direct". The most-specific suffix wins.
+  rules:
+    - via: bypass
+      suffixes:
+        - example.com
+        - example.net
+    - via: wg1
+      suffixes:
+        - api.example.com
+
+# Gateway/list-server for the L3 path. It forwards configured client traffic to
+# tunnel routes and serves their union as a plain CIDR list.
+gateway:
+  enabled: true
+  client_cidrs: ["10.10.0.0/24"]
+  list_listen: ":8088"
+
+# Optional pfsync mirrors a tunnel's aggregated routes into a pfSense OpenVPN
+# server's "IPv4 Local Network(s)" field. Use a dedicated forced-command SSH key.
+# The remote command must validate its input and update only that field.
+pfsync:
+  enabled: true
+  ssh_host: "10.0.0.1"          # pfSense LAN IP
+  ssh_port: 2222
+  ssh_user: admin
+  ssh_key: /etc/sakhtar-wg/pfsense_sync_key     # chmod 600
+  known_hosts: /etc/sakhtar-wg/pfsense_known_hosts  # pinned pfSense host key
+  from_tunnel: wg0
+  keep_networks: ["10.0.0.0/24"]                # always retained (LAN access)
