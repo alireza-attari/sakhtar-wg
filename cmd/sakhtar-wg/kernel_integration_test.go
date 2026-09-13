@@ -385,6 +385,9 @@ func TestMarkedTCPAndDNSEgress(t *testing.T) {
 	requirePrivilegedIntegration(t)
 	suffix := strconv.Itoa(os.Getpid())
 	dut, peer := "sakhtar-wg-dut-"+suffix, "sakhtar-wg-peer-"+suffix
+	// Registered first so it runs last, after every namespace and helper
+	// cleanup below: nothing the test created may outlive it.
+	t.Cleanup(func() { assertMarkedEgressCleanedUp(t, []string{dut, peer}, 24680) })
 	for _, ns := range []string{dut, peer} {
 		cleanupNamespace(ns)
 		runCommand(t, "ip", "netns", "add", ns)
@@ -449,6 +452,33 @@ func TestMarkedTCPAndDNSEgress(t *testing.T) {
 	client.Env = append(os.Environ(), egressHelperEnv+"=1")
 	if out, err := client.CombinedOutput(); err != nil {
 		t.Fatalf("marked egress helper: %v\n%s", err, out)
+	}
+}
+
+func assertMarkedEgressCleanedUp(t *testing.T, namespaces []string, table int) {
+	t.Helper()
+	for _, ns := range namespaces {
+		if _, err := os.Stat("/var/run/netns/" + ns); !os.IsNotExist(err) {
+			t.Errorf("namespace %s survived cleanup: %v", ns, err)
+		}
+	}
+	for _, name := range []string{"veth-dut", "veth-peer"} {
+		if _, err := netlink.LinkByName(name); err == nil {
+			t.Errorf("link %s leaked into the host namespace", name)
+		}
+	}
+	rules, err := netlink.RuleList(netlink.FAMILY_V4)
+	if err != nil {
+		t.Errorf("list rules: %v", err)
+	}
+	for _, rule := range rules {
+		if rule.Table == table || rule.Mark == uint32(table) {
+			t.Errorf("policy rule leaked into the host namespace: %v", rule)
+		}
+	}
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
+	if err != nil || len(routes) != 0 {
+		t.Errorf("table %d routes leaked into the host namespace: %v, %v", table, routes, err)
 	}
 }
 
