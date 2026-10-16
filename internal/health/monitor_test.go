@@ -85,3 +85,35 @@ func TestPassiveHealthDistinguishesIdleAndFailed(t *testing.T) {
 		t.Fatalf("signals = %#v", byName)
 	}
 }
+
+func TestGroupFailoverAndReturnToPrimary(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	primary := &wgtypes.Device{Peers: []wgtypes.Peer{{LastHandshakeTime: now.Add(-time.Second)}}}
+	backup := &wgtypes.Device{Peers: []wgtypes.Peer{{LastHandshakeTime: now.Add(-time.Second)}}}
+	client := &fakeDeviceClient{devices: map[string]*wgtypes.Device{"wg0": primary, "wg18": backup}}
+	monitor, err := New(client, Config{Interval: 10 * time.Second, Groups: []Group{{
+		Name: "bypass", HealthyAfter: 180 * time.Second,
+		Members: []Member{{Tunnel: "wg0", Mark: 51}, {Tunnel: "wg18", Mark: 52018}},
+	}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor.now = func() time.Time { return now }
+	for _, step := range []struct {
+		name string
+		age  time.Duration
+		mark int32
+	}{
+		{"primary healthy", time.Second, 51},
+		{"primary stale uses backup", 181 * time.Second, 52018},
+		{"primary recovered is preferred", time.Second, 51},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			primary.Peers[0].LastHandshakeTime = now.Add(-step.age)
+			monitor.Poll()
+			if got := monitor.Active("bypass").Load(); got != step.mark {
+				t.Fatalf("active mark = %d, want %d", got, step.mark)
+			}
+		})
+	}
+}

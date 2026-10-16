@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"runtime"
 	"sync/atomic"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	resolvercache "github.com/alireza-attari/sakhtar-wg/internal/dns"
 )
 
 func testProxyConfig(maximum, perSource int) *Config {
@@ -382,4 +385,57 @@ func TestReloadDoesNotInterruptActiveSession(t *testing.T) {
 	if forced := srv.Stop(); forced != 0 {
 		t.Fatalf("stop force-closed %d sessions", forced)
 	}
+}
+
+// A cached answer whose addresses all fail to connect must not survive its TTL:
+// a single-address answer leaves the dialer nothing to fall back to, so keeping
+// it would blackhole every later connection to that host until it expired.
+func TestDialFailureInvalidatesCachedAnswer(t *testing.T) {
+	const mark = 0x99
+	cfg := testProxyConfig(4, 0)
+	cfg.Tunnels = []Tunnel{{Name: "wgt0", Fwmark: mark}}
+	cfg.Proxy.Rules = []Rule{{Via: "wgt0", Suffixes: []string{"pinned.example"}}}
+
+	srv := NewServer(cfg, nil)
+	var resolves atomic.Int32
+	srv.rt.Load().resolvers[mark] = resolvercache.ResolverFunc(func(context.Context, resolvercache.Query) (resolvercache.Result, error) {
+		resolves.Add(1)
+		return resolvercache.Result{
+			Addrs:     []netip.Addr{netip.MustParseAddr("93.184.216.34")},
+			ExpiresAt: time.Now().Add(5 * time.Minute),
+			RCode:     resolvercache.RCodeSuccess,
+		}, nil
+	})
+	srv.dial = func(context.Context, string, string, int, time.Duration) (net.Conn, error) {
+		return nil, io.ErrClosedPipe
+	}
+	if err := srv.Start(cfg); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+
+	address := serverAddress(t, srv)
+	request := func() {
+		t.Helper()
+		client, err := net.DialTimeout("tcp", address, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer client.Close()
+		if _, err := client.Write([]byte("GET / HTTP/1.1\r\nHost: pinned.example\r\n\r\n")); err != nil {
+			t.Fatal(err)
+		}
+		_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := client.Read(make([]byte, 1)); err == nil {
+			t.Fatal("failed backend left the client session open")
+		}
+	}
+
+	request()
+	waitFor(t, 2*time.Second, func() bool { return resolves.Load() == 1 })
+	waitFor(t, 2*time.Second, func() bool { return srv.rt.Load().dns.metrics().EvictionsPositive == 1 })
+
+	// Well inside the 300s TTL: without the invalidation this would be a cache hit.
+	request()
+	waitFor(t, 2*time.Second, func() bool { return resolves.Load() == 2 })
 }

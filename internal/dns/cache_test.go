@@ -360,3 +360,70 @@ func benchmarkResolver() Resolver {
 		return Result{Addrs: []netip.Addr{netip.MustParseAddr("1.1.1.1")}, ExpiresAt: time.Now().Add(time.Minute), RCode: RCodeSuccess}, nil
 	})
 }
+
+func TestInvalidateForcesReresolution(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	policy := testPolicy()
+	policy.StalePolicy = StaleNever
+	cache := newTestCache(t, policy, clock)
+	var calls atomic.Int32
+	resolver := positiveResolver(clock, &calls)
+
+	if _, err := cache.Resolve(context.Background(), query("invalidate.example"), resolver); err != nil {
+		t.Fatal(err)
+	}
+	// Well inside the TTL: without invalidation this is served from the cache.
+	if _, err := cache.Resolve(context.Background(), query("invalidate.example"), resolver); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("resolver calls before invalidate = %d, want 1", calls.Load())
+	}
+
+	cache.Invalidate(query("invalidate.example"))
+	if _, err := cache.Resolve(context.Background(), query("invalidate.example"), resolver); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("resolver calls after invalidate = %d, want 2", calls.Load())
+	}
+	if stats := cache.Metrics(); stats.EvictionsPositive != 1 {
+		t.Fatalf("EvictionsPositive = %d, want 1", stats.EvictionsPositive)
+	}
+
+	// Unknown keys and malformed queries are no-ops, not panics.
+	cache.Invalidate(query("absent.example"))
+	cache.Invalidate(Query{Host: ""})
+}
+
+// Resolutions are attributed to the egress they were sent through. Without that
+// dimension a tunnel losing most of its DNS is averaged away by its healthy
+// peers, which is exactly how a degraded tunnel stays invisible.
+func TestResolutionMetricsAreAttributedPerEgress(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cache := newTestCache(t, testPolicy(), clock)
+	good := positiveResolver(clock, nil)
+	bad := ResolverFunc(func(context.Context, Query) (Result, error) {
+		return Result{}, errors.New("i/o timeout")
+	})
+
+	healthy := Query{Host: "a.example", Family: FamilyAny, Egress: "wga", Resolver: "system", Generation: 1}
+	degraded := Query{Host: "b.example", Family: FamilyAny, Egress: "wgb", Resolver: "system", Generation: 1}
+	if _, err := cache.Resolve(context.Background(), healthy, good); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.Resolve(context.Background(), degraded, bad); err == nil {
+		t.Fatal("expected the failing resolver to surface an error")
+	}
+
+	stats := cache.Metrics().Resolutions
+	if got := stats["positive|wga"].Count; got != 1 {
+		t.Fatalf("positive|wga = %d, want 1 (have %v)", got, stats)
+	}
+	if got := stats["transient|wgb"].Count; got != 1 {
+		t.Fatalf("transient|wgb = %d, want 1 (have %v)", got, stats)
+	}
+	if _, crossed := stats["transient|wga"]; crossed {
+		t.Fatalf("the healthy egress absorbed the other tunnel's failure: %v", stats)
+	}
+}

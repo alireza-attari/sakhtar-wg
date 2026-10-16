@@ -241,7 +241,7 @@ func (c *Cache) runFlight(k key, query Query, resolver Resolver, stale Result, s
 	cancel()
 	now := c.clock.Now()
 	result, err = c.normalizeResult(result, err, now)
-	c.metrics.recordResolution(result.RCode, query.Egress != "" && query.Egress != "direct", time.Since(started))
+	c.metrics.recordResolution(result.RCode, query.Egress, time.Since(started))
 
 	entry := cacheEntry{result: result.clone(), err: err}
 	if result.RCode == RCodeSuccess {
@@ -364,6 +364,33 @@ func (c *Cache) sweepLocked(shard *cacheShard, now time.Time, limit int) {
 			c.deleteLocked(shard, k, entry)
 		}
 	}
+}
+
+// Invalidate drops any cached entry for query so the next Resolve goes back
+// upstream instead of replaying the cached answer for the rest of its TTL.
+//
+// It exists for the dial path. A cached answer is only as good as the addresses
+// in it: when every one of them fails to connect, the entry is actively harmful,
+// and for a single-address answer — Google's OAuth endpoints return one A record
+// — there is no second candidate for the dialer to fall back to, so every
+// connection to that host fails until the entry expires on its own.
+//
+// A miss still collapses through the singleflight in Resolve, so an unreachable
+// host costs one upstream query per burst of connections, not one per connection.
+func (c *Cache) Invalidate(query Query) {
+	k, err := makeKey(query)
+	if err != nil {
+		return
+	}
+	shard := c.shardFor(k)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	entry, ok := shard.entries[k]
+	if !ok {
+		return
+	}
+	c.deleteLocked(shard, k, entry)
+	c.metrics.evictions[entry.class()].Add(1)
 }
 
 func (c *Cache) deleteLocked(shard *cacheShard, k key, entry cacheEntry) {

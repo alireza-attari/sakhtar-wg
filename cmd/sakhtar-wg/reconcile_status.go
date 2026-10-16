@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"sort"
 	"time"
@@ -119,7 +121,54 @@ func measureAndRecordDrift(wg wireGuardConfigurer, cfg *Config, applyErr error) 
 	}
 }
 
-func printRecordedReconcileStatus() {
+// liveDrift measures drift NOW rather than reporting what was recorded at the
+// last apply.
+//
+// The recorded gauges answer "did the apply leave the kernel correct", which is
+// not the question someone running `status` is asking — they want to know
+// whether it is correct *now*. The two diverge whenever something outside this
+// daemon removes an object it owns, and that is not hypothetical: on
+// 2026-08-09 every `ip rule fwmark ... lookup ...` had been flushed from
+// sr-proxy, the entire SNI bypass had been egressing via the plain WAN for
+// weeks, and `status` still printed `kernel_drift=0` because that was true at
+// the last route refresh six hours earlier.
+//
+// Errors are reported rather than swallowed: "cannot measure" must not read the
+// same as "measured zero", which is the whole failure mode above.
+// effectiveConfig returns the config as the DAEMON applied it: the file plus the
+// last-good fetched routes from `route_sources`.
+//
+// Diffing the raw file instead counts every auto-updated CIDR as drift. Measured
+// on sr-proxy: 236 Meta prefixes, so a freshly restarted box reported
+// kernel_drift=235 and a permanent DRIFTED — which is the stale `0` traded for
+// noise nobody would read either. PfSync is disabled on the copy so this
+// read-only path never constructs the SSH syncer.
+func effectiveConfig(cfg *Config) *Config {
+	base := *cfg
+	base.PfSync.Enabled = false
+	// Loading the route cache logs; on the daemon's startup path that line is
+	// useful, in `status` it is a stray "routesrc: loaded cached routes" in the
+	// middle of a report and reads like something went wrong.
+	previous := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(previous)
+	return NewRouteUpdater(&base, nil).Merge()
+}
+
+func liveDrift(wg wireGuardConfigurer, cfg *Config) (kernel, firewall int, err error) {
+	cfg = effectiveConfig(cfg)
+	plan, planErr := buildKernelPlan(wg, cfg)
+	if planErr != nil {
+		return 0, 0, fmt.Errorf("measure kernel drift: %w", planErr)
+	}
+	firewallPlan, firewallErr := buildFirewallPlan(cfg)
+	if firewallErr != nil {
+		return 0, 0, fmt.Errorf("measure firewall drift: %w", firewallErr)
+	}
+	return len(plan.Operations) + len(plan.Drift), len(firewallPlan), nil
+}
+
+func printRecordedReconcileStatus(wg wireGuardConfigurer, cfg *Config) {
 	status, err := readReconcileStatus()
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -133,6 +182,17 @@ func printRecordedReconcileStatus() {
 	}
 	fmt.Printf("reconcile  last_apply=%s result=%s kernel_drift=%d firewall_drift=%d\n",
 		status.LastApplyTime.Format(time.RFC3339), result, status.KernelDriftGauge, status.FirewallDriftGauge)
+	// The line above is history; this one is the answer to "is it right now".
+	if kernel, firewall, driftErr := liveDrift(wg, cfg); driftErr != nil {
+		fmt.Printf("           live       UNMEASURED (%v)\n", driftErr)
+	} else {
+		verdict := "in sync"
+		if kernel != 0 || firewall != 0 {
+			verdict = "DRIFTED — run `systemctl reload sakhtar-wg` to reconcile"
+		}
+		fmt.Printf("           live       kernel_drift=%d firewall_drift=%d  %s\n",
+			kernel, firewall, verdict)
+	}
 	keys := make([]string, 0, len(status.Sysctls))
 	for key := range status.Sysctls {
 		keys = append(keys, key)

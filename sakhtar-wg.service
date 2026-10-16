@@ -32,7 +32,8 @@ ProtectKernelLogs=yes
 ProtectClock=yes
 ProtectHostname=yes
 ProtectProc=invisible
-ProcSubset=pid
+# Do not set ProcSubset=pid: the daemon reconciles required sysctls through
+# /proc/sys/net during startup and readiness checks.
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictRealtime=yes

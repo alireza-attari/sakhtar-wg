@@ -43,7 +43,7 @@ func TestDialBudgetAndRetryCap(t *testing.T) {
 	var calls int
 	var peer net.Conn
 	metrics := &ConnectMetrics{}
-	conn, attempts, err := DialCandidates(context.Background(), candidates, "443", 2, true, func(context.Context, string, string) (net.Conn, error) {
+	conn, attempts, err := DialCandidates(context.Background(), candidates, "443", 2, "wgt0", func(context.Context, string, string) (net.Conn, error) {
 		calls++
 		if calls == 1 {
 			return nil, errors.New("first failed")
@@ -57,14 +57,16 @@ func TestDialBudgetAndRetryCap(t *testing.T) {
 	}
 	_ = conn.Close()
 	_ = peer.Close()
-	if got := metrics.Snapshot(); got["failure|marked"] != 1 || got["success|marked"] != 1 {
+	// Attempts are attributed to the egress that carried them, not just to
+	// "marked": an aggregate cannot show which tunnel is dropping connections.
+	if got := metrics.Snapshot(); got["failure|marked|wgt0"] != 1 || got["success|marked|wgt0"] != 1 {
 		t.Fatalf("connect metrics = %v", got)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	calls = 0
-	_, attempts, err = DialCandidates(ctx, candidates, "443", 3, false, func(ctx context.Context, _, _ string) (net.Conn, error) {
+	_, attempts, err = DialCandidates(ctx, candidates, "443", 3, DirectEgress, func(ctx context.Context, _, _ string) (net.Conn, error) {
 		calls++
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -91,7 +93,7 @@ func BenchmarkResolveAndDial(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		client, peer := net.Pipe()
-		conn, _, err := DialCandidates(context.Background(), candidates, "443", 1, false, func(context.Context, string, string) (net.Conn, error) {
+		conn, _, err := DialCandidates(context.Background(), candidates, "443", 1, DirectEgress, func(context.Context, string, string) (net.Conn, error) {
 			return client, nil
 		}, nil)
 		if err != nil {

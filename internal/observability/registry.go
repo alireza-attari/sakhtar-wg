@@ -38,7 +38,7 @@ type ProxySnapshot struct {
 	DurationSeconds map[string]float64
 	ClientBytes     map[string]uint64
 	BackendBytes    map[string]uint64
-	ConnectAttempts map[string]uint64 // outcome|egress_class
+	ConnectAttempts map[string]uint64 // outcome|egress_class|egress
 }
 
 type DNSSnapshot struct {
@@ -49,7 +49,7 @@ type DNSSnapshot struct {
 	Pending           int64
 	RejectedPending   uint64
 	Requests          map[string]uint64
-	Resolutions       map[string]DNSResolution // outcome|egress_class
+	Resolutions       map[string]DNSResolution // outcome|egress
 }
 
 type DNSResolution struct {
@@ -73,6 +73,7 @@ type GroupSnapshot struct {
 }
 
 type ProbeSnapshot struct {
+	Tunnel         string    `json:"tunnel"`
 	ObservedAt     time.Time `json:"observed_at"`
 	Success        bool      `json:"success"`
 	DurationSecond float64   `json:"duration_seconds"`
@@ -99,7 +100,7 @@ type Registry struct {
 	dns                        DNSSnapshot
 	wg                         map[string]WGSnapshot
 	groups                     map[string]GroupSnapshot
-	probe                      ProbeSnapshot
+	probes                     map[string]ProbeSnapshot
 	routes                     map[string]RouteSourceSnapshot
 	pfSync                     map[string]uint64
 	kernelDrift, firewallDrift int
@@ -188,8 +189,8 @@ func normalizeProxy(value ProxySnapshot) ProxySnapshot {
 		out.BackendBytes[enum(key, "completed", "canceled", "error")] += count
 	}
 	for key, count := range value.ConnectAttempts {
-		parts := fixedParts(key, 2)
-		bounded := enum(parts[0], "success", "failure") + "|" + enum(parts[1], "direct", "marked")
+		parts := fixedParts(key, 3)
+		bounded := enum(parts[0], "success", "failure") + "|" + enum(parts[1], "direct", "marked") + "|" + egressIdentity(parts[2])
 		out.ConnectAttempts[bounded] += count
 	}
 	return out
@@ -203,7 +204,7 @@ func (r *Registry) SetDNS(snapshot DNSSnapshot) {
 	resolutions := map[string]DNSResolution{}
 	for key, value := range snapshot.Resolutions {
 		parts := fixedParts(key, 2)
-		bounded := enum(parts[0], "positive", "nxdomain", "nodata", "transient") + "|" + enum(parts[1], "direct", "marked")
+		bounded := enum(parts[0], "positive", "nxdomain", "nodata", "transient") + "|" + egressIdentity(parts[1])
 		current := resolutions[bounded]
 		current.Count += value.Count
 		current.DurationSeconds += value.DurationSeconds
@@ -239,10 +240,20 @@ func (r *Registry) SetGroups(snapshots []GroupSnapshot) {
 	r.mu.Unlock()
 }
 
+// SetProbe records the latest active-probe result for one tunnel. Probes are
+// per tunnel because that is the only signal that separates a tunnel which is
+// merely up from one that still reaches the internet: WireGuard reports a fresh
+// handshake either way.
 func (r *Registry) SetProbe(snapshot ProbeSnapshot) {
+	if snapshot.Tunnel == "" {
+		snapshot.Tunnel = "default"
+	}
 	snapshot.LastError = RedactText(snapshot.LastError)
 	r.mu.Lock()
-	r.probe = snapshot
+	if r.probes == nil {
+		r.probes = map[string]ProbeSnapshot{}
+	}
+	r.probes[snapshot.Tunnel] = snapshot
 	r.mu.Unlock()
 }
 
@@ -307,7 +318,7 @@ type Status struct {
 	RouteSources     []RouteSourceSnapshot     `json:"route_sources,omitempty"`
 	WireGuard        []WGSnapshot              `json:"wireguard,omitempty"`
 	Groups           []GroupSnapshot           `json:"groups,omitempty"`
-	ActiveProbe      *ProbeSnapshot            `json:"active_probe,omitempty"`
+	ActiveProbes     []ProbeSnapshot           `json:"active_probes,omitempty"`
 }
 
 func (r *Registry) Status() Status {
@@ -327,10 +338,12 @@ func (r *Registry) Status() Status {
 	for _, snapshot := range r.groups {
 		status.Groups = append(status.Groups, snapshot)
 	}
-	if !r.probe.ObservedAt.IsZero() {
-		probe := r.probe
-		status.ActiveProbe = &probe
+	for _, snapshot := range r.probes {
+		if !snapshot.ObservedAt.IsZero() {
+			status.ActiveProbes = append(status.ActiveProbes, snapshot)
+		}
 	}
+	sort.Slice(status.ActiveProbes, func(i, j int) bool { return status.ActiveProbes[i].Tunnel < status.ActiveProbes[j].Tunnel })
 	sort.Slice(status.RouteSources, func(i, j int) bool { return status.RouteSources[i].Name < status.RouteSources[j].Name })
 	sort.Slice(status.WireGuard, func(i, j int) bool { return status.WireGuard[i].Tunnel < status.WireGuard[j].Tunnel })
 	sort.Slice(status.Groups, func(i, j int) bool { return status.Groups[i].Name < status.Groups[j].Name })
@@ -408,9 +421,26 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 			metric(w, "sakhtar_wg_proxy_backend_bytes_total", l, r.proxy.BackendBytes[outcome])
 		}
 	}
-	for _, key := range sortedKeys(r.proxy.ConnectAttempts) {
-		parts := fixedParts(key, 2)
-		metric(w, "sakhtar_wg_proxy_backend_connect_attempts_total", labels("outcome", parts[0], "egress_class", parts[1]), r.proxy.ConnectAttempts[key])
+	// Egress labels are folded against the tunnels the daemon actually reported,
+	// so the label set stays the configured identities plus "direct" no matter
+	// what reaches the snapshot maps.
+	knownEgress := func(value string) string {
+		if value == "direct" {
+			return value
+		}
+		if _, ok := r.wg[value]; ok {
+			return value
+		}
+		return "other"
+	}
+	connectAttempts := map[string]uint64{}
+	for key, count := range r.proxy.ConnectAttempts {
+		parts := fixedParts(key, 3)
+		connectAttempts[parts[0]+"|"+parts[1]+"|"+knownEgress(parts[2])] += count
+	}
+	for _, key := range sortedKeys(connectAttempts) {
+		parts := fixedParts(key, 3)
+		metric(w, "sakhtar_wg_proxy_backend_connect_attempts_total", labels("outcome", parts[0], "egress_class", parts[1], "egress", parts[2]), connectAttempts[key])
 	}
 	metric(w, "sakhtar_wg_dns_cache_entries", labels("class", "positive"), r.dns.EntriesPositive)
 	metric(w, "sakhtar_wg_dns_cache_entries", labels("class", "negative"), r.dns.EntriesNegative)
@@ -421,11 +451,23 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	for _, result := range sortedKeys(r.dns.Requests) {
 		metric(w, "sakhtar_wg_dns_requests_total", labels("result", enum(result, "hit", "miss", "stale", "negative", "refresh", "rejection")), r.dns.Requests[result])
 	}
-	for _, key := range sortedKeys(r.dns.Resolutions) {
+	resolutions := map[string]DNSResolution{}
+	for key, value := range r.dns.Resolutions {
 		parts := fixedParts(key, 2)
-		l := labels("outcome", enum(parts[0], "positive", "nxdomain", "nodata", "transient"), "egress_class", enum(parts[1], "direct", "marked"))
-		metric(w, "sakhtar_wg_dns_resolutions_total", l, r.dns.Resolutions[key].Count)
-		metric(w, "sakhtar_wg_dns_resolution_duration_seconds_sum", l, r.dns.Resolutions[key].DurationSeconds)
+		current := resolutions[parts[0]+"|"+knownEgress(egressIdentity(parts[1]))]
+		current.Count += value.Count
+		current.DurationSeconds += value.DurationSeconds
+		resolutions[parts[0]+"|"+knownEgress(egressIdentity(parts[1]))] = current
+	}
+	for _, key := range sortedKeys(resolutions) {
+		parts := fixedParts(key, 2)
+		class := "marked"
+		if parts[1] == "direct" {
+			class = "direct"
+		}
+		l := labels("outcome", enum(parts[0], "positive", "nxdomain", "nodata", "transient"), "egress_class", class, "egress", parts[1])
+		metric(w, "sakhtar_wg_dns_resolutions_total", l, resolutions[key].Count)
+		metric(w, "sakhtar_wg_dns_resolution_duration_seconds_sum", l, resolutions[key].DurationSeconds)
 	}
 	for _, name := range sortedKeys(r.wg) {
 		snapshot := r.wg[name]
@@ -439,14 +481,19 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 		snapshot := r.groups[name]
 		metric(w, "sakhtar_wg_group_policy_state", labels("group", name, "state", snapshot.State, "reason", snapshot.Reason), 1)
 	}
-	if !r.probe.ObservedAt.IsZero() {
+	for _, name := range sortedKeys(r.probes) {
+		snapshot := r.probes[name]
+		if snapshot.ObservedAt.IsZero() {
+			continue
+		}
 		success := 0
-		if r.probe.Success {
+		if snapshot.Success {
 			success = 1
 		}
-		metric(w, "sakhtar_wg_active_probe_success", "", success)
-		metric(w, "sakhtar_wg_active_probe_duration_seconds", "", r.probe.DurationSecond)
-		metric(w, "sakhtar_wg_active_probe_timestamp_seconds", "", r.probe.ObservedAt.Unix())
+		l := labels("tunnel", name)
+		metric(w, "sakhtar_wg_active_probe_success", l, success)
+		metric(w, "sakhtar_wg_active_probe_duration_seconds", l, snapshot.DurationSecond)
+		metric(w, "sakhtar_wg_active_probe_timestamp_seconds", l, snapshot.ObservedAt.Unix())
 	}
 	for _, name := range sortedKeys(r.routes) {
 		snapshot := r.routes[name]
@@ -460,6 +507,25 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	for _, outcome := range sortedKeys(r.pfSync) {
 		metric(w, "sakhtar_wg_pfsync_reconcile_total", labels("outcome", outcome), r.pfSync[outcome])
 	}
+}
+
+// egressIdentity bounds an egress label to the shape a configured tunnel name
+// can take, so a malformed key cannot inject label text or unbounded series.
+func egressIdentity(value string) string {
+	if value == "" {
+		return "direct"
+	}
+	if len(value) > 64 {
+		return "other"
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		default:
+			return "other"
+		}
+	}
+	return value
 }
 
 func enum(value string, allowed ...string) string {

@@ -77,8 +77,11 @@ type Config struct {
 	// Management serves bounded operational endpoints. It defaults to loopback
 	// and never accepts a wildcard/non-loopback TCP address.
 	Management Management `yaml:"management"`
-	// HealthProbe is an optional independent reachability check through one
-	// marked egress. It never probes a customer-requested destination.
+	// HealthProbe is an optional independent reachability check through the
+	// marked egresses. It never probes a customer-requested destination. With
+	// `via` empty it probes EVERY configured tunnel, which is the useful default:
+	// a per-tunnel answer is the only thing that separates a tunnel that is up
+	// from one that still reaches the internet.
 	HealthProbe HealthProbe `yaml:"health_probe"`
 }
 
@@ -427,7 +430,8 @@ func (c *Config) validate() error {
 		if endpoint.User != nil {
 			return fmt.Errorf("health_probe.endpoint must not contain credentials")
 		}
-		if !seenName[c.HealthProbe.Via] {
+		// Empty via = probe every tunnel; only a named one has to exist.
+		if c.HealthProbe.Via != "" && !seenName[c.HealthProbe.Via] {
 			return fmt.Errorf("health_probe.via %q is not a known tunnel", c.HealthProbe.Via)
 		}
 		if c.HealthProbe.Interval < 5 || !validSeconds(c.HealthProbe.Interval) {

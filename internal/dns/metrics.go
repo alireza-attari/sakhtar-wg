@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -21,11 +22,13 @@ const (
 	classKinds
 )
 
-const (
-	egressDirect = iota
-	egressMarked
-	egressKinds
-)
+// maxEgressLabels bounds the distinct egress identities the resolution metric
+// will track. Egress names come from the daemon's own tunnel list, so the real
+// count is a handful; anything beyond the cap folds into "other" rather than
+// letting a misconfiguration grow the series set without limit.
+const maxEgressLabels = 16
+
+const egressDirect = "direct"
 
 type resolutionMetric struct {
 	count atomic.Uint64
@@ -33,12 +36,15 @@ type resolutionMetric struct {
 }
 
 type metrics struct {
-	entries    [classKinds]atomic.Int64
-	evictions  [classKinds]atomic.Uint64
-	requests   [requestKinds]atomic.Uint64
-	pending    atomic.Int64
-	rejected   atomic.Uint64
-	resolution [4][egressKinds]resolutionMetric
+	entries   [classKinds]atomic.Int64
+	evictions [classKinds]atomic.Uint64
+	requests  [requestKinds]atomic.Uint64
+	pending   atomic.Int64
+	rejected  atomic.Uint64
+	// resolution is keyed "<rcode>|<egress>". A resolution happens once per cache
+	// miss, not once per connection, so a mutex here is not on any hot path.
+	resolutionMu sync.Mutex
+	resolution   map[string]*resolutionMetric
 }
 
 type ResolutionStats struct {
@@ -72,27 +78,45 @@ func (m *metrics) snapshot() MetricsSnapshot {
 	for i, name := range requestNames {
 		s.Requests[name] = m.requests[i].Load()
 	}
-	for outcome := RCodeSuccess; outcome <= RCodeTransient; outcome++ {
-		for class, className := range [...]string{"direct", "marked"} {
-			metric := &m.resolution[outcome][class]
-			s.Resolutions[outcome.String()+"|"+className] = ResolutionStats{
-				Count:         metric.count.Load(),
-				TotalDuration: time.Duration(metric.nanos.Load()),
-			}
+	m.resolutionMu.Lock()
+	for key, metric := range m.resolution {
+		s.Resolutions[key] = ResolutionStats{
+			Count:         metric.count.Load(),
+			TotalDuration: time.Duration(metric.nanos.Load()),
 		}
 	}
+	m.resolutionMu.Unlock()
 	return s
 }
 
-func (m *metrics) recordResolution(rcode RCode, marked bool, elapsed time.Duration) {
+// recordResolution attributes one upstream resolution to the egress it was sent
+// through. Without that attribution a single unhealthy tunnel losing most of its
+// DNS is invisible: the aggregate still looks mostly fine, while every miss that
+// happens to pick that tunnel fails.
+func (m *metrics) recordResolution(rcode RCode, egress string, elapsed time.Duration) {
 	if rcode > RCodeTransient {
 		rcode = RCodeTransient
 	}
-	class := egressDirect
-	if marked {
-		class = egressMarked
+	if egress == "" {
+		egress = egressDirect
 	}
-	metric := &m.resolution[rcode][class]
+	key := rcode.String() + "|" + egress
+	m.resolutionMu.Lock()
+	metric, ok := m.resolution[key]
+	if !ok {
+		if m.resolution == nil {
+			m.resolution = map[string]*resolutionMetric{}
+		}
+		if len(m.resolution) >= maxEgressLabels*4 {
+			key = rcode.String() + "|other"
+			metric, ok = m.resolution[key]
+		}
+		if !ok {
+			metric = &resolutionMetric{}
+			m.resolution[key] = metric
+		}
+	}
+	m.resolutionMu.Unlock()
 	metric.count.Add(1)
 	metric.nanos.Add(uint64(max(elapsed, 0)))
 }

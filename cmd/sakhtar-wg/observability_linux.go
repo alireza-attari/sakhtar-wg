@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	internalhealth "github.com/alireza-attari/sakhtar-wg/internal/health"
@@ -44,43 +45,78 @@ func healthObserver(registry *observability.Registry, activeProbe bool) func(int
 	}
 }
 
-func startActiveProbe(ctx context.Context, config *Config, registry *observability.Registry) *internalhealth.Prober {
+// startActiveProbe runs one active reachability probe per tunnel (or only the
+// named one, when health_probe.via is set) and publishes each result under that
+// tunnel's name.
+//
+// Per tunnel is the whole point. WireGuard reports a fresh handshake for a
+// tunnel whose exit has stopped resolving DNS or is dropping most of its
+// packets, and an aggregate probe through a single tunnel says nothing about
+// its peers — so a degraded member can sit in a group looking healthy while
+// every connection that lands on it fails.
+func startActiveProbe(ctx context.Context, config *Config, registry *observability.Registry) []*internalhealth.Prober {
 	if config == nil || !config.HealthProbe.Enabled {
 		return nil
 	}
-	client := (&RouteUpdater{}).httpClient(config, config.HealthProbe.Via)
-	go func() { <-ctx.Done(); client.CloseIdleConnections() }()
-	prober := internalhealth.NewProber(internalhealth.ProbeConfig{
-		Interval:      time.Duration(config.HealthProbe.Interval) * time.Second,
-		Timeout:       time.Duration(config.HealthProbe.Timeout) * time.Second,
-		Jitter:        float64(config.HealthProbe.JitterPercent) / 100,
-		MaxConcurrent: config.HealthProbe.MaxConcurrent,
-		Observe: func(result internalhealth.ProbeResult) {
-			lastError := ""
-			if result.Err != nil {
-				lastError = result.Err.Error()
+	targets := make([]string, 0, len(config.Tunnels))
+	if config.HealthProbe.Via != "" {
+		targets = append(targets, config.HealthProbe.Via)
+	} else {
+		for _, tunnel := range config.Tunnels {
+			targets = append(targets, tunnel.Name)
+		}
+	}
+
+	// The component verdict is an OR across tunnels: one reachable egress still
+	// means the daemon can serve, so a single degraded member must not report the
+	// whole health component down. Its own per-tunnel metric carries that detail.
+	var mu sync.Mutex
+	lastByTunnel := make(map[string]bool, len(targets))
+
+	probers := make([]*internalhealth.Prober, 0, len(targets))
+	for _, target := range targets {
+		client := (&RouteUpdater{}).httpClient(config, target)
+		go func() { <-ctx.Done(); client.CloseIdleConnections() }()
+		prober := internalhealth.NewProber(internalhealth.ProbeConfig{
+			Interval:      time.Duration(config.HealthProbe.Interval) * time.Second,
+			Timeout:       time.Duration(config.HealthProbe.Timeout) * time.Second,
+			Jitter:        float64(config.HealthProbe.JitterPercent) / 100,
+			MaxConcurrent: config.HealthProbe.MaxConcurrent,
+			Observe: func(result internalhealth.ProbeResult) {
+				lastError := ""
+				if result.Err != nil {
+					lastError = result.Err.Error()
+				}
+				registry.SetProbe(observability.ProbeSnapshot{Tunnel: target, ObservedAt: result.At, Success: result.Success, DurationSecond: result.Duration.Seconds(), LastError: lastError})
+				mu.Lock()
+				lastByTunnel[target] = result.Success
+				any := false
+				for _, ok := range lastByTunnel {
+					any = any || ok
+				}
+				mu.Unlock()
+				registry.SetComponent("health", false, any, boolOutcome(any), result.Err)
+			},
+		}, func(probeCtx context.Context) error {
+			request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, config.HealthProbe.Endpoint, nil)
+			if err != nil {
+				return err
 			}
-			registry.SetProbe(observability.ProbeSnapshot{ObservedAt: result.At, Success: result.Success, DurationSecond: result.Duration.Seconds(), LastError: lastError})
-			registry.SetComponent("health", false, result.Success, boolOutcome(result.Success), result.Err)
-		},
-	}, func(probeCtx context.Context) error {
-		request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, config.HealthProbe.Endpoint, nil)
-		if err != nil {
-			return err
-		}
-		response, err := client.Do(request)
-		if err != nil {
-			return err
-		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
-		_ = response.Body.Close()
-		if response.StatusCode < 200 || response.StatusCode >= 400 {
-			return fmt.Errorf("probe HTTP status class %dxx", response.StatusCode/100)
-		}
-		return nil
-	})
-	go prober.Run(ctx)
-	return prober
+			response, err := client.Do(request)
+			if err != nil {
+				return err
+			}
+			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+			_ = response.Body.Close()
+			if response.StatusCode < 200 || response.StatusCode >= 400 {
+				return fmt.Errorf("probe HTTP status class %dxx", response.StatusCode/100)
+			}
+			return nil
+		})
+		go prober.Run(ctx)
+		probers = append(probers, prober)
+	}
+	return probers
 }
 
 func collectOperationalState(registry *observability.Registry, server *Server) {

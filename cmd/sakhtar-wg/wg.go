@@ -68,6 +68,24 @@ func tunnelUp(wg wireGuardConfigurer, t Tunnel) error {
 	if err := requireSysctl("net/ipv4/conf/all/src_valid_mark", "1"); err != nil {
 		return fmt.Errorf("%s: src_valid_mark: %w", t.Name, err)
 	}
+	return reconcilePlumbing(link, t)
+}
+
+// reconcilePlumbing brings the kernel objects around a tunnel back to the
+// config: its default route, its fwmark policy rule, and its static routes.
+//
+// Split out of tunnelUp so a reload can run it WITHOUT touching the WireGuard
+// device. Every step is idempotent and a no-op when the kernel already agrees,
+// which is what makes it safe to run against a live tunnel — unlike
+// ConfigureDevice/LinkSetUp, which can cost a re-handshake.
+//
+// This exists because the kernel can lose these objects without the config
+// changing at all. Observed in prod 2026-08-09: every `ip rule fwmark ... lookup
+// ...` was gone from sr-proxy while the config was untouched, so every domain in
+// the SNI bypass — github, npm, ghcr, openai, anthropic, cursor — silently
+// egressed via the plain WAN for weeks. `systemctl reload` did not repair it;
+// only a restart did.
+func reconcilePlumbing(link netlink.Link, t Tunnel) error {
 	if err := reconcileDefaultRoute(link, t); err != nil {
 		return err
 	}

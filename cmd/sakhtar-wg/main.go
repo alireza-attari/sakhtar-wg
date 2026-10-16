@@ -353,7 +353,34 @@ func applyReload(wg *wgctrl.Client, old, next *Config, srv *Server, hm *HealthMo
 		keep[t.Name] = true
 		prev, existed := oldByName[t.Name]
 		if existed && reflect.DeepEqual(prev, t) {
-			continue // unchanged — don't disturb the live tunnel
+			// Unchanged CONFIG is not the same as unchanged KERNEL. This used to
+			// `continue` outright, which made reload structurally unable to
+			// repair anything the kernel had lost — and on 2026-08-09 that was
+			// every fwmark policy rule on sr-proxy: reload reported success and
+			// changed nothing, only a restart brought them back, because a
+			// restart is the one path that always runs tunnelUp.
+			//
+			// So skip the WireGuard device (touching it can cost a re-handshake,
+			// which is what the old fast path was protecting) but still reconcile
+			// the plumbing around it. Every step there is a no-op when the kernel
+			// already agrees, so the protection is kept and the blind spot is not.
+			link, found, err := lookupLink(t.Name)
+			if err != nil {
+				return rollbackKernelApply(wg, old, next, fmt.Errorf("inspect tunnel %s: %w", t.Name, err))
+			}
+			if !found {
+				// The link itself is gone — the fast path cannot help, so fall
+				// through to the full apply below.
+				if err := tunnelUp(wg, t); err != nil {
+					return rollbackKernelApply(wg, old, next, fmt.Errorf("apply tunnel %s: %w", t.Name, err))
+				}
+				log.Printf("tunnel %s recreated (link was missing)", t.Name)
+				continue
+			}
+			if err := reconcilePlumbing(link, t); err != nil {
+				return rollbackKernelApply(wg, old, next, fmt.Errorf("reconcile tunnel %s: %w", t.Name, err))
+			}
+			continue
 		}
 		if err := tunnelUp(wg, t); err != nil {
 			return rollbackKernelApply(wg, old, next, fmt.Errorf("apply tunnel %s: %w", t.Name, err))
@@ -477,7 +504,7 @@ func runStatus(path string) {
 	}
 	defer wg.Close()
 	printStatus(wg, cfg)
-	printRecordedReconcileStatus()
+	printRecordedReconcileStatus(wg, cfg)
 }
 
 func runReload() {

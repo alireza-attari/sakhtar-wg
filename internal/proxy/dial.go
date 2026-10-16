@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 )
 
@@ -112,39 +113,71 @@ func reverse(addrs []netip.Addr) {
 
 type DialFunc func(context.Context, string, string) (net.Conn, error)
 
+// DirectEgress is the egress identity for connections that leave over the
+// host's own route rather than through a tunnel.
+const DirectEgress = "direct"
+
+// maxEgressLabels bounds the distinct egress identities tracked here. Egress
+// names come from the daemon's configured tunnel list, so the real count is a
+// handful; beyond the cap they fold into "other".
+const maxEgressLabels = 16
+
+// ConnectMetrics counts backend dial attempts per egress. The egress dimension
+// is the point: an aggregate "marked" failure count cannot tell a healthy
+// tunnel apart from one that is dropping most of its connections, because the
+// healthy tunnels' successes hide it.
 type ConnectMetrics struct {
-	successDirect atomic.Uint64
-	failureDirect atomic.Uint64
-	successMarked atomic.Uint64
-	failureMarked atomic.Uint64
+	mu      sync.Mutex
+	entries map[string]*atomic.Uint64
 }
 
-func (m *ConnectMetrics) record(success, marked bool) {
-	switch {
-	case success && marked:
-		m.successMarked.Add(1)
-	case success:
-		m.successDirect.Add(1)
-	case marked:
-		m.failureMarked.Add(1)
-	default:
-		m.failureDirect.Add(1)
+func (m *ConnectMetrics) record(success bool, egress string) {
+	if egress == "" {
+		egress = DirectEgress
 	}
+	outcome := "failure"
+	if success {
+		outcome = "success"
+	}
+	class := "marked"
+	if egress == DirectEgress {
+		class = "direct"
+	}
+	key := outcome + "|" + class + "|" + egress
+	m.mu.Lock()
+	counter, ok := m.entries[key]
+	if !ok {
+		if m.entries == nil {
+			m.entries = map[string]*atomic.Uint64{}
+		}
+		if len(m.entries) >= maxEgressLabels*4 {
+			key = outcome + "|" + class + "|other"
+			counter, ok = m.entries[key]
+		}
+		if !ok {
+			counter = &atomic.Uint64{}
+			m.entries[key] = counter
+		}
+	}
+	m.mu.Unlock()
+	counter.Add(1)
 }
 
+// Snapshot returns counts keyed "<outcome>|<egress_class>|<egress>".
 func (m *ConnectMetrics) Snapshot() map[string]uint64 {
-	return map[string]uint64{
-		"success|direct": m.successDirect.Load(),
-		"failure|direct": m.failureDirect.Load(),
-		"success|marked": m.successMarked.Load(),
-		"failure|marked": m.failureMarked.Load(),
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]uint64, len(m.entries))
+	for key, counter := range m.entries {
+		out[key] = counter.Load()
 	}
+	return out
 }
 
 // DialCandidates retries only the already validated IP literals supplied by
 // the selector. The caller owns ctx's total deadline; no attempt receives a new
 // budget. The returned count is useful for bounded observability and tests.
-func DialCandidates(ctx context.Context, candidates []netip.Addr, port string, attemptCap int, marked bool, dial DialFunc, metrics *ConnectMetrics) (net.Conn, int, error) {
+func DialCandidates(ctx context.Context, candidates []netip.Addr, port string, attemptCap int, egress string, dial DialFunc, metrics *ConnectMetrics) (net.Conn, int, error) {
 	if attemptCap <= 0 {
 		return nil, 0, errors.New("proxy: connect attempt cap must be greater than zero")
 	}
@@ -166,12 +199,12 @@ func DialCandidates(ctx context.Context, candidates []netip.Addr, port string, a
 		conn, err := dial(ctx, "tcp", address)
 		if err == nil {
 			if metrics != nil {
-				metrics.record(true, marked)
+				metrics.record(true, egress)
 			}
 			return conn, i + 1, nil
 		}
 		if metrics != nil {
-			metrics.record(false, marked)
+			metrics.record(false, egress)
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", address, err))
 	}

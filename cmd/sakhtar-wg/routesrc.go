@@ -340,7 +340,7 @@ func (u *RouteUpdater) httpClient(base *Config, via string) *http.Client {
 			if len(candidates) == 0 {
 				return nil, errDestinationDenied
 			}
-			conn, _, err := proxydial.DialCandidates(ctx, candidates, port, attemptCap, true, func(dialCtx context.Context, dialNetwork, dialAddress string) (net.Conn, error) {
+			conn, _, err := proxydial.DialCandidates(ctx, candidates, port, attemptCap, via, func(dialCtx context.Context, dialNetwork, dialAddress string) (net.Conn, error) {
 				return dialMarkedContext(dialCtx, dialNetwork, dialAddress, mark, fetchTimeout)
 			}, nil)
 			return conn, err

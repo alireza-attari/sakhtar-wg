@@ -9,6 +9,7 @@ import (
 	"time"
 
 	resolvercache "github.com/alireza-attari/sakhtar-wg/internal/dns"
+	proxydial "github.com/alireza-attari/sakhtar-wg/internal/proxy"
 )
 
 var errCachedFail = errors.New("cached authoritative negative DNS answer")
@@ -25,7 +26,11 @@ type dnsCache struct {
 	cache      *resolvercache.Cache
 	generation uint64
 	resolverID string
-	now        func() time.Time
+	// egressNames maps a tunnel's fwmark to its configured name, so cache keys
+	// and the resolution metrics carry the tunnel an answer was fetched through
+	// rather than an opaque mark number.
+	egressNames map[int]string
+	now         func() time.Time
 }
 
 type dnsCacheClock struct{ cache *dnsCache }
@@ -49,7 +54,7 @@ func newDNSCache(posTTL time.Duration) *dnsCache {
 		StaleWindow:         defaultDNSStaleWindow * time.Second,
 		StalePolicy:         resolvercache.StaleTransient,
 		ResolverTimeout:     defaultDNSResolverTimeout * time.Second,
-	}, 1, "legacy")
+	}, 1, "legacy", nil)
 }
 
 func newDNSCacheForConfig(c *Config, generation uint64) *dnsCache {
@@ -80,7 +85,7 @@ func newDNSCacheForConfig(c *Config, generation uint64) *dnsCache {
 		StaleWindow:         time.Duration(staleWindow) * time.Second,
 		StalePolicy:         resolvercache.StalePolicy(stalePolicy),
 		ResolverTimeout:     time.Duration(resolverTimeout) * time.Second,
-	}, generation, c.Proxy.Resolver)
+	}, generation, c.Proxy.Resolver, tunnelNamesByMark(c))
 }
 
 func positiveOr(value, fallback int) int {
@@ -90,11 +95,21 @@ func positiveOr(value, fallback int) int {
 	return value
 }
 
-func newDNSCacheWithPolicy(policy resolvercache.Policy, generation uint64, resolverID string) *dnsCache {
+// tunnelNamesByMark indexes the configured tunnels by fwmark. Marks are unique
+// per tunnel (config validation enforces it), so this is a total mapping.
+func tunnelNamesByMark(c *Config) map[int]string {
+	names := make(map[int]string, len(c.Tunnels))
+	for _, tunnel := range c.Tunnels {
+		names[tunnel.Fwmark] = tunnel.Name
+	}
+	return names
+}
+
+func newDNSCacheWithPolicy(policy resolvercache.Policy, generation uint64, resolverID string, egressNames map[int]string) *dnsCache {
 	if policy.MaxPositiveTTL < policy.MinPositiveTTL {
 		policy.MaxPositiveTTL = policy.MinPositiveTTL
 	}
-	adapter := &dnsCache{generation: generation, resolverID: resolverID, now: time.Now}
+	adapter := &dnsCache{generation: generation, resolverID: resolverID, egressNames: egressNames, now: time.Now}
 	cache, err := resolvercache.NewCache(policy, dnsCacheClock{cache: adapter})
 	if err != nil {
 		panic(err) // validated configuration and constants make this unreachable
@@ -135,17 +150,38 @@ func (c *dnsCache) lookup(ctx context.Context, mark int, host string, resolve re
 }
 
 func (c *dnsCache) resolve(ctx context.Context, mark int, host string, resolver resolvercache.Resolver) (resolvercache.Result, error) {
-	egress := "direct"
-	if mark != 0 {
-		egress = "mark:" + strconv.Itoa(mark)
-	}
-	return c.cache.Resolve(ctx, resolvercache.Query{
+	return c.cache.Resolve(ctx, c.query(mark, host), resolver)
+}
+
+// invalidate drops the cached answer for host on this egress. The dial path
+// calls it when every address the answer produced failed to connect, so the
+// next connection re-resolves instead of re-dialing a dead address for the rest
+// of the TTL.
+func (c *dnsCache) invalidate(mark int, host string) {
+	c.cache.Invalidate(c.query(mark, host))
+}
+
+func (c *dnsCache) query(mark int, host string) resolvercache.Query {
+	egress := c.egressName(mark)
+	return resolvercache.Query{
 		Host:       host,
 		Family:     resolvercache.FamilyAny,
 		Egress:     egress,
 		Resolver:   c.resolverID,
 		Generation: c.generation,
-	}, resolver)
+	}
+}
+
+// egressName is the tunnel's name when one is configured for the mark, and the
+// mark itself otherwise so an unmapped egress is still distinguishable.
+func (c *dnsCache) egressName(mark int) string {
+	if mark == 0 {
+		return proxydial.DirectEgress
+	}
+	if name, ok := c.egressNames[mark]; ok && name != "" {
+		return name
+	}
+	return "mark-" + strconv.Itoa(mark)
 }
 
 func (c *dnsCache) metrics() resolvercache.MetricsSnapshot { return c.cache.Metrics() }

@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,7 @@ type router struct {
 	suffixes                *internalrouting.SuffixMatcher[markRef]
 	dns                     *dnsCache
 	resolvers               map[int]resolvercache.Resolver
+	egressNames             map[int]string
 	selector                *proxydial.RotatingSelector
 	connectAttemptCap       int
 }
@@ -115,6 +117,7 @@ func newRouterGeneration(c *Config, hm *HealthMonitor, generation uint64, dial f
 		suffixes:                internalrouting.NewSuffixMatcher[markRef](len(c.Proxy.Rules)),
 		dns:                     cache,
 		resolvers:               resolvers,
+		egressNames:             tunnelNamesByMark(c),
 		selector:                &proxydial.RotatingSelector{Strategy: strategy, MaxAttempts: attemptCap},
 		connectAttemptCap:       attemptCap,
 	}
@@ -467,10 +470,29 @@ func (s *Server) dialBackend(ctx context.Context, host string, isIP bool, port s
 	if err != nil {
 		return nil, err
 	}
-	conn, _, err := proxydial.DialCandidates(ctx, candidates, port, rt.connectAttemptCap, mark != 0, func(dialCtx context.Context, network, address string) (net.Conn, error) {
+	conn, _, err := proxydial.DialCandidates(ctx, candidates, port, rt.connectAttemptCap, rt.egressName(mark), func(dialCtx context.Context, network, address string) (net.Conn, error) {
 		return s.dial(dialCtx, network, address, mark, rt.dialTimeout)
 	}, &s.connectMetrics)
+	if err != nil && !isIP {
+		// Every candidate this answer produced failed. Drop it so the next
+		// connection re-resolves: a single-address answer has nothing for the
+		// dialer to fall back to, and keeping it pinned turns one unreachable
+		// address into a blackhole that lasts the whole cache TTL.
+		rt.dns.invalidate(mark, host)
+	}
 	return conn, err
+}
+
+// egressName names the egress a mark selects, so connect metrics are attributed
+// to the tunnel that actually carried (or dropped) the attempt.
+func (rt *router) egressName(mark int) string {
+	if mark == 0 {
+		return proxydial.DirectEgress
+	}
+	if name, ok := rt.egressNames[mark]; ok && name != "" {
+		return name
+	}
+	return "mark-" + strconv.Itoa(mark)
 }
 
 func (s *Server) backendCandidates(ctx context.Context, host string, isIP bool, mark int, rt *router, self map[netip.Addr]struct{}) ([]netip.Addr, error) {
