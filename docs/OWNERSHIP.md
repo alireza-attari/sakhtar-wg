@@ -25,6 +25,19 @@ systemd-networkd, routing daemons, provisioning scripts, or another
 sakhtar-wg instance. Startup reports a conflict before mutation when those
 allocations contain an object that does not match the desired owned tuple.
 
+systemd-networkd also deletes every policy rule it did not create each time it
+starts, and a package upgrade restarts it. On a host running networkd, install
+[`contrib/networkd.conf.d/10-sakhtar-wg.conf`](../contrib/networkd.conf.d/10-sakhtar-wg.conf)
+as `/etc/systemd/networkd.conf.d/10-sakhtar-wg.conf`
+(`ManageForeignRoutingPolicyRules=no`). Without it, marked traffic falls back to
+the main table and egresses via the WAN until the daemon's next kernel check
+puts the rules back (at most 30 seconds).
+
+The running daemon compares the kernel and firewall with its configuration
+every 30 seconds and reapplies owned state that has gone missing, without
+touching a live WireGuard device. It refuses to act on blocking drift, the same
+way startup does.
+
 ## Link creation and adoption
 
 The default `adopt_existing: false` rejects every same-name interface that

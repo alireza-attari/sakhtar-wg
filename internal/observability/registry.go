@@ -103,6 +103,7 @@ type Registry struct {
 	probes                     map[string]ProbeSnapshot
 	routes                     map[string]RouteSourceSnapshot
 	pfSync                     map[string]uint64
+	kernelRepair               map[string]uint64
 	kernelDrift, firewallDrift int
 }
 
@@ -110,7 +111,7 @@ func NewRegistry() *Registry {
 	return &Registry{
 		started: time.Now(), reload: map[string]uint64{}, reloadTime: map[string]float64{},
 		components: map[string]ComponentState{}, wg: map[string]WGSnapshot{}, groups: map[string]GroupSnapshot{}, routes: map[string]RouteSourceSnapshot{},
-		pfSync: map[string]uint64{},
+		pfSync: map[string]uint64{}, kernelRepair: map[string]uint64{},
 	}
 }
 
@@ -290,6 +291,13 @@ func (r *Registry) RecordPfSync(outcome string, resultErrors ...error) {
 		resultErr = resultErrors[0]
 	}
 	r.SetComponent("pfsync", false, ready, outcome, resultErr)
+}
+
+func (r *Registry) RecordKernelRepair(outcome string) {
+	outcome = boundedOutcome(outcome)
+	r.mu.Lock()
+	r.kernelRepair[outcome]++
+	r.mu.Unlock()
 }
 
 func (r *Registry) Ready() (bool, []string) {
@@ -506,6 +514,9 @@ func (r *Registry) WritePrometheus(w io.Writer) {
 	}
 	for _, outcome := range sortedKeys(r.pfSync) {
 		metric(w, "sakhtar_wg_pfsync_reconcile_total", labels("outcome", outcome), r.pfSync[outcome])
+	}
+	for _, outcome := range sortedKeys(r.kernelRepair) {
+		metric(w, "sakhtar_wg_kernel_repair_total", labels("outcome", outcome), r.kernelRepair[outcome])
 	}
 }
 

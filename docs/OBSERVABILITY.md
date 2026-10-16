@@ -108,6 +108,10 @@ Alert on sustained symptoms, not isolated events:
 - proxy overload rejection rate;
 - route-source last-success age beyond two configured refresh intervals;
 - persistent non-zero kernel or firewall drift;
+- any increase of `sakhtar_wg_kernel_repair_total`: something outside the
+  daemon removed owned state (`outcome="success"` means it was put back,
+  `outcome="failure"` means it is still missing). The `kernel.repaired` and
+  `kernel.repair_failed` log lines name each object;
 - every member of a required group lacking recent or successful active evidence
   under a fail-closed deployment policy; and
 - goroutine, FD, or heap growth out of proportion to active sessions.

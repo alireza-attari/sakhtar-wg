@@ -117,3 +117,22 @@ func TestConnectAttemptsAndResolutionsCarryEgress(t *testing.T) {
 		}
 	}
 }
+
+func TestKernelRepairCounter(t *testing.T) {
+	registry := NewRegistry()
+	registry.RecordKernelRepair("success")
+	registry.RecordKernelRepair("success")
+	registry.RecordKernelRepair("failure")
+	registry.RecordKernelRepair("rule 31002 restored")
+	var out strings.Builder
+	registry.WritePrometheus(&out)
+	for _, line := range []string{
+		`sakhtar_wg_kernel_repair_total{outcome="success"} 2`,
+		`sakhtar_wg_kernel_repair_total{outcome="failure"} 1`,
+		`sakhtar_wg_kernel_repair_total{outcome="other"} 1`,
+	} {
+		if !strings.Contains(out.String(), line) {
+			t.Fatalf("metrics missing %q:\n%s", line, out.String())
+		}
+	}
+}

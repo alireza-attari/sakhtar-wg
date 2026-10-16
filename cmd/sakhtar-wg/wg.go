@@ -332,7 +332,7 @@ func applyRoutes(cfg *Config) {
 			kernelDrift++
 			continue
 		}
-		if err := reconcileRoutes(link, t); err != nil {
+		if err := reconcilePlumbing(link, t); err != nil {
 			log.Printf("routes: %s: %v", t.Name, err)
 			applyErrors = append(applyErrors, err)
 			kernelDrift++

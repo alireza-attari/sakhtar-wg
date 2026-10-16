@@ -215,13 +215,19 @@ func runUp(path string) {
 		go updater.Run(ctx)
 	}
 
+	kernelTick := time.NewTicker(kernelReconcileInterval)
+	defer kernelTick.Stop()
+	var watch kernelWatch
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 loop:
 	for {
 		select {
+		case <-kernelTick.C:
+			watch.repair(wg, cfg, registry)
 		case merged := <-applyCh:
-			// Route-only refresh from the updater: reconcile L3 routes and the
+			// Route-only refresh from the updater: reconcile routes, rules and the
 			// served list without disturbing the WireGuard devices.
 			applyRoutes(merged)
 			if list != nil {
