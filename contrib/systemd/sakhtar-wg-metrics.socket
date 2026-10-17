@@ -1,0 +1,22 @@
+# Install as /etc/systemd/system/sakhtar-wg-metrics.socket (with
+# sakhtar-wg-metrics.service), then `systemctl enable --now sakhtar-wg-metrics.socket`.
+#
+# The management listener refuses any non-loopback bind by design, so a remote
+# Prometheus cannot reach it directly. This forwards one LAN port to it instead of
+# loosening the daemon's own binding. Every management endpoint (/metrics, /status,
+# /readyz, /livez) answers through it, so it admits only the Prometheus host.
+#
+# Replace 192.0.2.10 with this host's LAN address and 192.0.2.7 with Prometheus.
+[Unit]
+Description=LAN listener that fronts sakhtar-wg's loopback management endpoint
+Documentation=man:systemd-socket-proxyd(8)
+
+[Socket]
+ListenStream=192.0.2.10:9101
+BindIPv6Only=ipv6-only
+FreeBind=true
+IPAddressDeny=any
+IPAddressAllow=192.0.2.7/32
+
+[Install]
+WantedBy=sockets.target

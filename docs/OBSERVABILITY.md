@@ -7,6 +7,19 @@ The listener has explicit header-read, write, idle, header-size, and graceful
 shutdown limits. pprof is disabled by default and can only be enabled on this
 local listener.
 
+## Central scraping and log shipping
+
+The daemon never binds management to a LAN address. To let a remote Prometheus
+scrape it, install
+[`contrib/systemd/sakhtar-wg-metrics.socket`](../contrib/systemd/sakhtar-wg-metrics.socket)
+and its `.service`: a `systemd-socket-proxyd` forward from one LAN port to the
+loopback listener, restricted by `IPAddressAllow=` to the Prometheus host. Changing
+it never restarts sakhtar-wg.
+
+Logs go to journald as JSON. To ship them to a syslog collector, install
+[`contrib/rsyslog.d/60-sakhtar-wg-forward.conf`](../contrib/rsyslog.d/60-sakhtar-wg-forward.conf),
+which forwards only the `sakhtar-wg` program's lines.
+
 ## Endpoint semantics
 
 | Endpoint | Success | Failure | Meaning |

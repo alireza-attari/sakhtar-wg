@@ -1,0 +1,16 @@
+# Started on demand by sakhtar-wg-metrics.socket; exits after 5 idle minutes.
+# The target must match `management.listen`.
+[Unit]
+Description=Proxy the LAN metrics port to sakhtar-wg's loopback management endpoint
+Requires=sakhtar-wg-metrics.socket
+After=sakhtar-wg-metrics.socket sakhtar-wg.service
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --exit-idle-time=5min 127.0.0.1:9090
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=64M
