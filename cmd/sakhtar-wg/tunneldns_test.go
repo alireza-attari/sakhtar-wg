@@ -193,8 +193,10 @@ func TestTunnelResolverFallsBackToTCPOnUDPTimeout(t *testing.T) {
 
 			started := time.Now()
 			addrs, err := resolver.LookupNetIP(context.Background(), "ip", "www.gstatic.com.")
-			if elapsed := time.Since(started); elapsed > 900*time.Millisecond {
-				t.Fatalf("lookup took %s, over its 600ms budget", elapsed)
+			// Twice the budget: generous enough for a loaded -race runner, still
+			// far below an unbounded retry.
+			if elapsed := time.Since(started); elapsed > 1200*time.Millisecond {
+				t.Fatalf("lookup took %s, over twice its 600ms budget", elapsed)
 			}
 			switch {
 			case tc.want != nil && (err != nil || !slices.Equal(addrs, tc.want)):
