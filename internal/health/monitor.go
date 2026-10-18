@@ -39,6 +39,9 @@ type Config struct {
 	Interval time.Duration
 	Groups   []Group
 	Observe  func(Snapshot)
+	// Probe, when set, makes group selection require a passing active probe on
+	// top of a recent handshake. Nil keeps selection handshake-only.
+	Probe *ProbePolicy
 }
 
 type SessionSignal string
@@ -47,6 +50,15 @@ const (
 	SessionRecent      SessionSignal = "recent"
 	SessionIdleUnknown SessionSignal = "idle_unknown"
 	SessionFailed      SessionSignal = "failed"
+)
+
+// Group selection reasons. They are metric label values, so the observability
+// registry allow-lists exactly this set.
+const (
+	ReasonRecentHandshake             = "recent_handshake"
+	ReasonRecentHandshakeProbePassing = "recent_handshake_probe_passing"
+	ReasonProbeFailingFailOpen        = "probe_failing_fail_open_recent_handshake"
+	ReasonNoRecentHandshakeFailOpen   = "no_recent_handshake_fail_open_primary"
 )
 
 type TunnelSnapshot struct {
@@ -88,6 +100,7 @@ type Monitor struct {
 	now      func() time.Time
 	logger   *slog.Logger
 	observe  func(Snapshot)
+	probes   *probeTracker
 
 	mu       sync.RWMutex
 	snapshot Snapshot
@@ -104,6 +117,12 @@ func New(client DeviceClient, cfg Config, logger *slog.Logger) (*Monitor, error)
 		logger = slog.Default()
 	}
 	m := &Monitor{wg: client, interval: cfg.Interval, now: time.Now, logger: logger, observe: cfg.Observe, byName: map[string]*groupState{}}
+	if cfg.Probe != nil {
+		if err := cfg.Probe.validate(); err != nil {
+			return nil, err
+		}
+		m.probes = newProbeTracker(*cfg.Probe)
+	}
 	for _, group := range cfg.Groups {
 		if group.Name == "" || len(group.Members) == 0 || group.HealthyAfter <= 0 {
 			return nil, errors.New("health: invalid group")
@@ -124,6 +143,15 @@ func (m *Monitor) Active(name string) *atomic.Int32 {
 		return &group.active
 	}
 	return nil
+}
+
+// ObserveProbe feeds one active-probe result for tunnel into group selection.
+// It takes effect at the next poll.
+func (m *Monitor) ObserveProbe(tunnel string, result ProbeResult) {
+	if m == nil || m.probes == nil {
+		return
+	}
+	m.probes.record(TunnelName(tunnel), result.Success, result.At)
 }
 
 func (m *Monitor) Run(ctx context.Context) {
@@ -206,17 +234,10 @@ func (m *Monitor) Poll() {
 
 	groups := make([]GroupSnapshot, 0, len(m.groups))
 	for _, state := range m.groups {
-		chosen := state.group.Members[0].Mark
-		groupState, reason := "degraded", "no_recent_handshake_fail_open_primary"
-		for _, member := range state.group.Members {
-			if byTunnel[member.Tunnel].Signal == SessionRecent {
-				chosen, groupState, reason = member.Mark, "ready", "recent_handshake"
-				break
-			}
-		}
+		chosen, groupState, reason := m.selectMember(state.group.Members, byTunnel, now)
 		previous := FwMark(uint32(state.active.Swap(int32(chosen))))
 		if previous != chosen {
-			m.logger.Info("health.group_selection_changed", "component", "health", "group", state.group.Name, "fwmark", uint32(chosen), "outcome", groupState)
+			m.logger.Info("health.group_selection_changed", "component", "health", "group", state.group.Name, "fwmark", uint32(chosen), "outcome", groupState, "reason", reason)
 		}
 		groups = append(groups, GroupSnapshot{Name: state.group.Name, ActiveMark: chosen, State: groupState, Reason: reason})
 	}
@@ -231,4 +252,31 @@ func (m *Monitor) Poll() {
 	if m.observe != nil {
 		m.observe(snapshot)
 	}
+}
+
+// selectMember picks the first member, in preference order, whose handshake is
+// recent and whose probe does not rule it out. When none qualifies it fails
+// open: first to a member that at least has a recent handshake, so a probe
+// endpoint that is itself down degrades to handshake-only selection rather than
+// to a member with no session at all, and finally to the primary.
+func (m *Monitor) selectMember(members []Member, byTunnel map[TunnelName]TunnelSnapshot, now time.Time) (FwMark, string, string) {
+	firstRecent := -1
+	for i, member := range members {
+		if byTunnel[member.Tunnel].Signal != SessionRecent {
+			continue
+		}
+		if firstRecent < 0 {
+			firstRecent = i
+		}
+		switch m.probes.verdict(member.Tunnel, now) {
+		case ProbePassing:
+			return member.Mark, "ready", ReasonRecentHandshakeProbePassing
+		case ProbeUnknown:
+			return member.Mark, "ready", ReasonRecentHandshake
+		}
+	}
+	if firstRecent >= 0 {
+		return members[firstRecent].Mark, "degraded", ReasonProbeFailingFailOpen
+	}
+	return members[0].Mark, "degraded", ReasonNoRecentHandshakeFailOpen
 }

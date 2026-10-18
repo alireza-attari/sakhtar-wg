@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alireza-attari/sakhtar-wg/internal/health"
 	lifecycle "github.com/alireza-attari/sakhtar-wg/internal/runtime"
 )
 
@@ -134,5 +135,28 @@ func TestKernelRepairCounter(t *testing.T) {
 		if !strings.Contains(out.String(), line) {
 			t.Fatalf("metrics missing %q:\n%s", line, out.String())
 		}
+	}
+}
+
+// group_policy_state must name why a group chose its mark; a reason missing
+// from the allow-list would collapse to "other" and hide a probe failover.
+func TestGroupReasonsSurviveNormalization(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		want   string
+	}{
+		{health.ReasonRecentHandshake, health.ReasonRecentHandshake},
+		{health.ReasonRecentHandshakeProbePassing, health.ReasonRecentHandshakeProbePassing},
+		{health.ReasonProbeFailingFailOpen, health.ReasonProbeFailingFailOpen},
+		{health.ReasonNoRecentHandshakeFailOpen, health.ReasonNoRecentHandshakeFailOpen},
+		{"host-1.example", "other"},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			registry := NewRegistry()
+			registry.SetGroups([]GroupSnapshot{{Name: "bypass", State: "ready", Reason: tc.reason}})
+			if got := registry.Status().Groups[0].Reason; got != tc.want {
+				t.Fatalf("reason = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -43,9 +43,21 @@ alerts.
   old. This is not declared failed without additional evidence.
 - `wg_session_recent=failed`: the device query failed or the expected peer is
   absent.
-- Group `state` and `reason` report the chosen mark. When no member has a recent
-  handshake, current policy is `degraded` with
-  `no_recent_handshake_fail_open_primary`; the primary is retained.
+- Group `state` and `reason` report the chosen mark. A member is eligible when
+  its handshake is recent and, with `health_probe` enabled, its probe passes;
+  the first eligible member in preference order is chosen:
+  - `ready` / `recent_handshake_probe_passing`: chosen member's probe passes.
+  - `ready` / `recent_handshake`: the member has no probe result (probing is
+    off, `via` names another tunnel, or the first result is still pending).
+  - `degraded` / `probe_failing_fail_open_recent_handshake`: every member with
+    a recent handshake is failing or stale on its probe; the first of them is
+    kept, so a broken probe endpoint degrades to handshake-only selection.
+  - `degraded` / `no_recent_handshake_fail_open_primary`: no member has a
+    recent handshake; the primary is retained.
+- Probe verdicts have hysteresis: `fail_after` consecutive failures (default
+  2) take a member out, `recover_after` consecutive successes (default 3)
+  bring it back, and a result older than `max_age` (default 3 x interval)
+  counts as failing. The first result after start or reload is taken as is.
 
 Each health interval queries every unique WireGuard device once and derives all
 member/group state from that immutable snapshot. It never performs one kernel

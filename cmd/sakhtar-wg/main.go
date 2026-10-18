@@ -207,7 +207,7 @@ func runUp(path string) {
 	// on the main goroutine, so it never races a SIGHUP reload.
 	ctx, cancel := context.WithCancel(context.Background())
 	probeCtx, probeCancel := context.WithCancel(context.Background())
-	_ = startActiveProbe(probeCtx, cfg, registry)
+	_ = startActiveProbe(probeCtx, cfg, registry, hm)
 	applyCh := make(chan *Config, 1)
 	var updater *RouteUpdater
 	if needsRouteUpdater(cfg) {
@@ -287,7 +287,7 @@ loop:
 				cfg = next
 				probeCancel()
 				probeCtx, probeCancel = context.WithCancel(context.Background())
-				_ = startActiveProbe(probeCtx, cfg, registry)
+				_ = startActiveProbe(probeCtx, cfg, registry, hm)
 				measureAndRecordDrift(wg, cfg, nil)
 				collectOperationalState(registry, srv)
 				recordReload(registry, srv, reloadStarted, nil)

@@ -36,6 +36,12 @@ health_probe:
   timeout: 5
   jitter_percent: 20
   max_concurrent: 1
+  # A group member is eligible only while its handshake is recent AND its probe
+  # passes. fail_after consecutive failures take it out, recover_after
+  # consecutive successes bring it back; a result older than max_age seconds
+  # (default 3 x interval) counts as failing.
+  fail_after: 2
+  recover_after: 3
 
 # Add as many tunnels as you like — each is an independent upstream WireGuard
 # provider with its own unique fwmark/table. A proxy rule or an L3 route sends

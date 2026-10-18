@@ -117,3 +117,124 @@ func TestGroupFailoverAndReturnToPrimary(t *testing.T) {
 		})
 	}
 }
+
+func newProbeAwareMonitor(t *testing.T, now *time.Time, wg0, wg18 *wgtypes.Device) *Monitor {
+	t.Helper()
+	client := &fakeDeviceClient{devices: map[string]*wgtypes.Device{"wg0": wg0, "wg18": wg18}}
+	monitor, err := New(client, Config{
+		Interval: 10 * time.Second,
+		Probe:    &ProbePolicy{MaxAge: 90 * time.Second, FailAfter: 2, RecoverAfter: 3},
+		Groups: []Group{{
+			Name: "bypass", HealthyAfter: 180 * time.Second,
+			Members: []Member{{Tunnel: "wg0", Mark: 51}, {Tunnel: "wg18", Mark: 52018}},
+		}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor.now = func() time.Time { return *now }
+	return monitor
+}
+
+// A fresh handshake is not reachability: wg0 kept one on 2026-10-18 while it
+// passed no traffic, and the group stayed on it because selection never read
+// the probe. Each step below is cumulative over one monitor.
+func TestGroupSelectionRequiresPassingProbe(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	wg0 := &wgtypes.Device{Peers: []wgtypes.Peer{{LastHandshakeTime: now}}}
+	wg18 := &wgtypes.Device{Peers: []wgtypes.Peer{{LastHandshakeTime: now}}}
+	monitor := newProbeAwareMonitor(t, &now, wg0, wg18)
+
+	type probe struct {
+		tunnel  string
+		success bool
+	}
+	for _, step := range []struct {
+		name    string
+		advance time.Duration
+		probes  []probe
+		wg0Age  time.Duration
+		mark    int32
+		state   string
+		reason  string
+	}{
+		{name: "no probe result yet falls back to handshake", mark: 51, state: "ready", reason: ReasonRecentHandshake},
+		{name: "first failure is believed without history", probes: []probe{{"wg0", false}, {"wg18", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing},
+		{name: "one success does not fail back", advance: 30 * time.Second, probes: []probe{{"wg0", true}, {"wg18", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing},
+		{name: "two successes do not fail back", advance: 30 * time.Second, probes: []probe{{"wg0", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing},
+		{name: "third consecutive success fails back", advance: 30 * time.Second, probes: []probe{{"wg0", true}, {"wg18", true}}, mark: 51, state: "ready", reason: ReasonRecentHandshakeProbePassing},
+		{name: "one failure does not fail over", advance: 30 * time.Second, probes: []probe{{"wg0", false}, {"wg18", true}}, mark: 51, state: "ready", reason: ReasonRecentHandshakeProbePassing},
+		{name: "a success resets the failure count", advance: 30 * time.Second, probes: []probe{{"wg0", true}, {"wg0", false}}, mark: 51, state: "ready", reason: ReasonRecentHandshakeProbePassing},
+		{name: "second consecutive failure fails over", advance: 30 * time.Second, probes: []probe{{"wg0", false}, {"wg18", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing},
+		{name: "both failing keeps a member with a session", probes: []probe{{"wg18", false}, {"wg18", false}}, mark: 51, state: "degraded", reason: ReasonProbeFailingFailOpen},
+		{name: "no handshake anywhere fails open to primary", wg0Age: time.Hour, mark: 51, state: "degraded", reason: ReasonNoRecentHandshakeFailOpen},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			now = now.Add(step.advance)
+			wg0.Peers[0].LastHandshakeTime = now.Add(-step.wg0Age)
+			wg18.Peers[0].LastHandshakeTime = now
+			if step.wg0Age > 0 {
+				wg18.Peers[0].LastHandshakeTime = now.Add(-step.wg0Age)
+			}
+			for _, p := range step.probes {
+				monitor.ObserveProbe(p.tunnel, ProbeResult{At: now, Success: p.success})
+			}
+			monitor.Poll()
+			if got := monitor.Active("bypass").Load(); got != step.mark {
+				t.Fatalf("active mark = %d, want %d", got, step.mark)
+			}
+			group := monitor.Snapshot().Groups[0]
+			if group.State != step.state || group.Reason != step.reason {
+				t.Fatalf("group = %s/%s, want %s/%s", group.State, group.Reason, step.state, step.reason)
+			}
+		})
+	}
+}
+
+// A probe loop that stops reporting must not keep a tunnel eligible on its last
+// verdict: the tunnel could have died the moment the reports stopped.
+func TestStaleProbeResultMakesMemberIneligible(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	for _, tc := range []struct {
+		name string
+		age  time.Duration
+		mark int32
+	}{
+		{"result within max_age counts", 90 * time.Second, 51},
+		{"result past max_age is stale", 91 * time.Second, 52018},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wg0 := &wgtypes.Device{Peers: []wgtypes.Peer{{LastHandshakeTime: now}}}
+			wg18 := &wgtypes.Device{Peers: []wgtypes.Peer{{LastHandshakeTime: now}}}
+			monitor := newProbeAwareMonitor(t, &now, wg0, wg18)
+			monitor.ObserveProbe("wg0", ProbeResult{At: now.Add(-tc.age), Success: true})
+			monitor.Poll()
+			if got := monitor.Active("bypass").Load(); got != tc.mark {
+				t.Fatalf("active mark = %d, want %d", got, tc.mark)
+			}
+		})
+	}
+}
+
+func TestProbePolicyValidation(t *testing.T) {
+	client := &fakeDeviceClient{}
+	groups := []Group{{Name: "g", HealthyAfter: time.Minute, Members: []Member{{Tunnel: "wg0", Mark: 1}}}}
+	for _, tc := range []struct {
+		name   string
+		policy ProbePolicy
+		valid  bool
+	}{
+		{"valid", ProbePolicy{MaxAge: time.Minute, FailAfter: 1, RecoverAfter: 1}, true},
+		{"zero max age", ProbePolicy{FailAfter: 1, RecoverAfter: 1}, false},
+		{"zero fail_after", ProbePolicy{MaxAge: time.Minute, RecoverAfter: 1}, false},
+		{"zero recover_after", ProbePolicy{MaxAge: time.Minute, FailAfter: 1}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := tc.policy
+			_, err := New(client, Config{Interval: time.Second, Groups: groups, Probe: &policy}, nil)
+			if (err == nil) != tc.valid {
+				t.Fatalf("err = %v, valid = %t", err, tc.valid)
+			}
+		})
+	}
+}

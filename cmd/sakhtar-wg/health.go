@@ -23,6 +23,13 @@ func NewHealthMonitor(c *Config, observers ...func(internalhealth.Snapshot)) (*H
 		return nil, err
 	}
 	config := internalhealth.Config{Interval: time.Duration(c.HealthInterval) * time.Second}
+	if c.HealthProbe.Enabled {
+		config.Probe = &internalhealth.ProbePolicy{
+			MaxAge:       time.Duration(c.HealthProbe.MaxAge) * time.Second,
+			FailAfter:    c.HealthProbe.FailAfter,
+			RecoverAfter: c.HealthProbe.RecoverAfter,
+		}
+	}
 	if len(observers) > 0 {
 		config.Observe = observers[0]
 	}

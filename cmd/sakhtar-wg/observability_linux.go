@@ -47,14 +47,14 @@ func healthObserver(registry *observability.Registry, activeProbe bool) func(int
 
 // startActiveProbe runs one active reachability probe per tunnel (or only the
 // named one, when health_probe.via is set) and publishes each result under that
-// tunnel's name.
+// tunnel's name and into hm's group selection.
 //
 // Per tunnel is the whole point. WireGuard reports a fresh handshake for a
 // tunnel whose exit has stopped resolving DNS or is dropping most of its
 // packets, and an aggregate probe through a single tunnel says nothing about
 // its peers — so a degraded member can sit in a group looking healthy while
 // every connection that lands on it fails.
-func startActiveProbe(ctx context.Context, config *Config, registry *observability.Registry) []*internalhealth.Prober {
+func startActiveProbe(ctx context.Context, config *Config, registry *observability.Registry, hm *HealthMonitor) []*internalhealth.Prober {
 	if config == nil || !config.HealthProbe.Enabled {
 		return nil
 	}
@@ -86,6 +86,7 @@ func startActiveProbe(ctx context.Context, config *Config, registry *observabili
 				if result.Err != nil {
 					lastError = result.Err.Error()
 				}
+				hm.ObserveProbe(target, result)
 				registry.SetProbe(observability.ProbeSnapshot{Tunnel: target, ObservedAt: result.At, Success: result.Success, DurationSecond: result.Duration.Seconds(), LastError: lastError})
 				mu.Lock()
 				lastByTunnel[target] = result.Success

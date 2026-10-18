@@ -60,7 +60,8 @@ type Config struct {
 	Tunnels []Tunnel `yaml:"tunnels"`
 	// Groups are failover sets of tunnels. A proxy rule (or the default) may
 	// target a group name instead of a single tunnel; the health monitor keeps
-	// the group pointed at its first member with a fresh WireGuard handshake.
+	// the group pointed at its first member with a fresh WireGuard handshake
+	// and, when health_probe is enabled, a passing active probe.
 	Groups  []Group `yaml:"groups"`
 	Proxy   Proxy   `yaml:"proxy"`
 	Gateway Gateway `yaml:"gateway"`
@@ -93,6 +94,13 @@ type HealthProbe struct {
 	Timeout       int    `yaml:"timeout"`
 	JitterPercent int    `yaml:"jitter_percent"`
 	MaxConcurrent int    `yaml:"max_concurrent"`
+	// FailAfter consecutive failed probes take a tunnel out of its groups, and
+	// RecoverAfter consecutive passing probes bring it back. 0 => 2 and 3.
+	FailAfter    int `yaml:"fail_after"`
+	RecoverAfter int `yaml:"recover_after"`
+	// MaxAge (s) is how long the last probe result counts; an older one makes
+	// the tunnel ineligible. 0 => 3 x interval.
+	MaxAge int `yaml:"max_age"`
 }
 
 type Management struct {
@@ -124,8 +132,9 @@ type PfSync struct {
 
 // Group is a failover set of tunnels sharing one logical egress name. A proxy
 // rule (or proxy.default) can route to the group name; the health monitor keeps
-// it pointed at the first member whose handshake is fresh, so a dead upstream
-// fails over without a reload or any per-connection cost.
+// it pointed at the first member whose handshake is fresh and whose active probe
+// (when enabled) passes, so a dead upstream fails over without a reload or any
+// per-connection cost.
 type Group struct {
 	Name         string   `yaml:"name"`          // referenced by proxy.rules[].via / proxy.default
 	Members      []string `yaml:"members"`       // tunnel names, in preference order (primary first)
@@ -446,6 +455,15 @@ func (c *Config) validate() error {
 		if c.HealthProbe.MaxConcurrent < 1 || c.HealthProbe.MaxConcurrent > 8 {
 			return fmt.Errorf("health_probe.max_concurrent must be between 1 and 8")
 		}
+		if c.HealthProbe.FailAfter < 1 || c.HealthProbe.FailAfter > 10 {
+			return fmt.Errorf("health_probe.fail_after must be between 1 and 10")
+		}
+		if c.HealthProbe.RecoverAfter < 1 || c.HealthProbe.RecoverAfter > 10 {
+			return fmt.Errorf("health_probe.recover_after must be between 1 and 10")
+		}
+		if !validSeconds(c.HealthProbe.MaxAge) || c.HealthProbe.MaxAge < c.HealthProbe.Interval+c.HealthProbe.Timeout {
+			return fmt.Errorf("health_probe.max_age must be at least health_probe.interval + health_probe.timeout")
+		}
 	}
 	if err := kernelstate.ValidateAllocations(allocations); err != nil {
 		return err
@@ -725,6 +743,17 @@ func (c *Config) normalize() {
 	}
 	if c.HealthProbe.MaxConcurrent == 0 {
 		c.HealthProbe.MaxConcurrent = 1
+	}
+	if c.HealthProbe.FailAfter == 0 {
+		c.HealthProbe.FailAfter = 2
+	}
+	if c.HealthProbe.RecoverAfter == 0 {
+		c.HealthProbe.RecoverAfter = 3
+	}
+	if c.HealthProbe.MaxAge == 0 {
+		// Three rounds: Prober.Try skips a round while a probe is still in
+		// flight, so one or two missed results must not read as stale.
+		c.HealthProbe.MaxAge = 3 * c.HealthProbe.Interval
 	}
 	if c.Management.Listen == "" {
 		c.Management.Listen = "127.0.0.1:9090"

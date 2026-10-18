@@ -63,7 +63,8 @@ func TestParseConfigDefaultsAndNormalization(t *testing.T) {
 	if cfg.Management.Listen != "127.0.0.1:9090" || cfg.Management.MaxHeaderBytes != defaultManagementMaxHeaderBytes || cfg.Management.Pprof {
 		t.Fatalf("management defaults = %+v", cfg.Management)
 	}
-	if cfg.HealthProbe.Interval != 30 || cfg.HealthProbe.Timeout != 5 || cfg.HealthProbe.MaxConcurrent != 1 {
+	if cfg.HealthProbe.Interval != 30 || cfg.HealthProbe.Timeout != 5 || cfg.HealthProbe.MaxConcurrent != 1 ||
+		cfg.HealthProbe.FailAfter != 2 || cfg.HealthProbe.RecoverAfter != 3 || cfg.HealthProbe.MaxAge != 90 {
 		t.Fatalf("health probe defaults = %+v", cfg.HealthProbe)
 	}
 	if cfg.Proxy.Default != "direct" || cfg.Proxy.DialTimeout != 10 || cfg.Proxy.DNSCacheTTL != 300 ||
@@ -101,6 +102,9 @@ func TestParseConfigRejectsInvalidInput(t *testing.T) {
 		{"wildcard management", strings.Replace(valid, "tunnels:", "management:\n  listen: 0.0.0.0:9090\ntunnels:", 1), "loopback IP literal"},
 		{"probe credentials", strings.Replace(valid, "tunnels:", "health_probe:\n  enabled: true\n  endpoint: https://user:pass@example.test/ping\n  via: wg0\n  interval: 30\n  timeout: 5\n  max_concurrent: 1\ntunnels:", 1), "must not contain credentials"},
 		{"probe concurrency", strings.Replace(valid, "tunnels:", "health_probe:\n  enabled: true\n  endpoint: https://example.test/ping\n  via: wg0\n  interval: 30\n  timeout: 5\n  max_concurrent: 9\ntunnels:", 1), "max_concurrent"},
+		{"probe fail_after", strings.Replace(valid, "tunnels:", "health_probe:\n  enabled: true\n  endpoint: https://example.test/ping\n  interval: 30\n  timeout: 5\n  fail_after: 11\ntunnels:", 1), "fail_after"},
+		{"probe recover_after", strings.Replace(valid, "tunnels:", "health_probe:\n  enabled: true\n  endpoint: https://example.test/ping\n  interval: 30\n  timeout: 5\n  recover_after: -1\ntunnels:", 1), "recover_after"},
+		{"probe max_age shorter than a round", strings.Replace(valid, "tunnels:", "health_probe:\n  enabled: true\n  endpoint: https://example.test/ping\n  interval: 30\n  timeout: 5\n  max_age: 34\ntunnels:", 1), "max_age"},
 		{"bad interface name", strings.Replace(valid, "name: wg0", "name: a/b", 1), "name must be"},
 		{"long interface name", strings.Replace(valid, "name: wg0", "name: wireguard-too-long", 1), "name must be"},
 		{"bad private key", strings.Replace(valid, testKey(1), "not-a-key", 1), "private_key"},

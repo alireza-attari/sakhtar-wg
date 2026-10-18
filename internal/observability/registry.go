@@ -233,7 +233,8 @@ func (r *Registry) SetGroups(snapshots []GroupSnapshot) {
 	bounded := make(map[string]GroupSnapshot, len(snapshots))
 	for _, snapshot := range snapshots {
 		snapshot.State = enum(snapshot.State, "ready", "degraded", "failed")
-		snapshot.Reason = enum(snapshot.Reason, "recent_handshake", "no_recent_handshake_fail_open_primary")
+		snapshot.Reason = enum(snapshot.Reason, "recent_handshake", "recent_handshake_probe_passing",
+			"probe_failing_fail_open_recent_handshake", "no_recent_handshake_fail_open_primary")
 		bounded[snapshot.Name] = snapshot
 	}
 	r.mu.Lock()
