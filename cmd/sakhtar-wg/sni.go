@@ -126,9 +126,10 @@ func newRouterGeneration(c *Config, hm *HealthMonitor, generation uint64, dial f
 	resolvers := map[int]resolvercache.Resolver{
 		0: &resolvercache.NetResolver{Resolver: net.DefaultResolver, LocalTTL: localTTL},
 	}
+	destination := newDestinationPolicy(c)
 	for _, tunnel := range c.Tunnels {
 		resolvers[tunnel.Fwmark] = &resolvercache.NetResolver{
-			Resolver: newTunnelResolver(dial, servers, tunnel.Fwmark, resolverTimeout),
+			Resolver: newTunnelResolver(dial, servers, tunnel.Fwmark, resolverTimeout, destination.answerAllowed(tunnel.Fwmark)),
 			LocalTTL: localTTL,
 		}
 	}
@@ -151,7 +152,7 @@ func newRouterGeneration(c *Config, hm *HealthMonitor, generation uint64, dial f
 		maxClientHelloBytes:     int64(c.Proxy.MaxClientHelloBytes),
 		maxHTTPHeaderBytes:      int64(c.Proxy.MaxHTTPHeaderBytes),
 		sourceACL:               compileSourceACL(c),
-		destination:             newDestinationPolicy(c),
+		destination:             destination,
 		suffixes:                internalrouting.NewSuffixMatcher[markRef](len(c.Proxy.Rules)),
 		dns:                     cache,
 		resolvers:               resolvers,

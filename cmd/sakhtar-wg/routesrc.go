@@ -299,7 +299,7 @@ func (u *RouteUpdater) httpClient(base *Config, via string) *http.Client {
 	selector := &proxydial.RotatingSelector{Strategy: strategy, MaxAttempts: attemptCap}
 	destination := newDestinationPolicy(base)
 	noSelfAddresses := map[netip.Addr]struct{}{}
-	markedResolver := newTunnelResolver(dialMarkedContext, base.Proxy.Resolver.orDefault(), mark, resolverTimeout)
+	markedResolver := newTunnelResolver(dialMarkedContext, base.Proxy.Resolver.orDefault(), mark, resolverTimeout, destination.answerAllowed(mark))
 	tr := &http.Transport{
 		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: 15 * time.Second,

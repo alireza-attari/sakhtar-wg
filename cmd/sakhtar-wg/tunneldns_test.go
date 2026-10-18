@@ -20,9 +20,13 @@ const (
 	dnsAnswer dnsBehavior = iota
 	dnsSilent
 	dnsNXDomain
+	dnsPoisoned
 )
 
-var testDNSAnswer = [4]byte{93, 184, 216, 34}
+var (
+	testDNSAnswer     = [4]byte{93, 184, 216, 34}
+	testPoisonedReply = [4]byte{10, 10, 34, 36}
+)
 
 func dnsReply(t *testing.T, query []byte, behavior dnsBehavior) []byte {
 	t.Helper()
@@ -46,7 +50,11 @@ func dnsReply(t *testing.T, query []byte, behavior dnsBehavior) []byte {
 	_ = builder.Question(question)
 	if rcode == dnsmessage.RCodeSuccess && question.Type == dnsmessage.TypeA {
 		_ = builder.StartAnswers()
-		_ = builder.AResource(dnsmessage.ResourceHeader{Name: question.Name, Class: dnsmessage.ClassINET, TTL: 60}, dnsmessage.AResource{A: testDNSAnswer})
+		answer := testDNSAnswer
+		if behavior == dnsPoisoned {
+			answer = testPoisonedReply
+		}
+		_ = builder.AResource(dnsmessage.ResourceHeader{Name: question.Name, Class: dnsmessage.ClassINET, TTL: 60}, dnsmessage.AResource{A: answer})
 	}
 	reply, err := builder.Finish()
 	if err != nil {
@@ -132,20 +140,28 @@ func (s *testDNSServer) counts() (udp, tcp int) {
 	return s.queries["udp"], s.queries["tcp"]
 }
 
+// wg0's relay hijacks UDP/53 (10.10.34.x for blocked names) while TCP/53 is
+// clean, and OpenDNS loses most UDP from wg18's exit while TCP answers. Both
+// must still resolve through the tunnel.
 func TestTunnelResolverFallsBackToTCPOnUDPTimeout(t *testing.T) {
 	const mark = 52018
+	clean := []netip.Addr{netip.AddrFrom4(testDNSAnswer)}
+	poisoned := []netip.Addr{netip.AddrFrom4(testPoisonedReply)}
 	for _, tc := range []struct {
 		name     string
 		servers  [][2]dnsBehavior
-		found    bool
+		want     []netip.Addr
 		notFound bool
 		usedTCP  []bool
 	}{
-		{name: "UDP answer needs no TCP", servers: [][2]dnsBehavior{{dnsAnswer, dnsAnswer}}, found: true, usedTCP: []bool{false}},
-		{name: "UDP timeout retries over TCP", servers: [][2]dnsBehavior{{dnsSilent, dnsAnswer}}, found: true, usedTCP: []bool{true}},
+		{name: "UDP answer needs no TCP", servers: [][2]dnsBehavior{{dnsAnswer, dnsAnswer}}, want: clean, usedTCP: []bool{false}},
+		{name: "UDP timeout retries over TCP", servers: [][2]dnsBehavior{{dnsSilent, dnsAnswer}}, want: clean, usedTCP: []bool{true}},
 		{name: "NXDOMAIN over UDP is final", servers: [][2]dnsBehavior{{dnsNXDomain, dnsAnswer}}, notFound: true, usedTCP: []bool{false}},
 		{name: "both transports silent fails within budget", servers: [][2]dnsBehavior{{dnsSilent, dnsSilent}}, usedTCP: []bool{true}},
-		{name: "a dead server falls through to the next", servers: [][2]dnsBehavior{{dnsSilent, dnsSilent}, {dnsAnswer, dnsAnswer}}, found: true, usedTCP: []bool{true, false}},
+		{name: "a dead server falls through to the next", servers: [][2]dnsBehavior{{dnsSilent, dnsSilent}, {dnsAnswer, dnsAnswer}}, want: clean, usedTCP: []bool{true, false}},
+		{name: "poisoned UDP answer retries over TCP", servers: [][2]dnsBehavior{{dnsPoisoned, dnsAnswer}}, want: clean, usedTCP: []bool{true}},
+		{name: "poisoned server falls through to the next", servers: [][2]dnsBehavior{{dnsPoisoned, dnsPoisoned}, {dnsAnswer, dnsAnswer}}, want: clean, usedTCP: []bool{true, false}},
+		{name: "poisoned everywhere hands the answer on", servers: [][2]dnsBehavior{{dnsPoisoned, dnsPoisoned}, {dnsPoisoned, dnsSilent}}, want: poisoned, usedTCP: []bool{true, true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			servers := make([]*testDNSServer, 0, len(tc.servers))
@@ -169,7 +185,8 @@ func TestTunnelResolverFallsBackToTCPOnUDPTimeout(t *testing.T) {
 				}
 				return (&net.Dialer{}).DialContext(ctx, network, target)
 			}
-			resolver := newTunnelResolver(dial, names, mark, 600*time.Millisecond)
+			policy := newDestinationPolicy(&Config{Tunnels: []Tunnel{{Name: "wg18", Fwmark: mark}}})
+			resolver := newTunnelResolver(dial, names, mark, 600*time.Millisecond, policy.answerAllowed(mark))
 			resolver.slice = func(remaining time.Duration, attemptsLeft int) time.Duration {
 				return remaining / time.Duration(attemptsLeft)
 			}
@@ -180,11 +197,11 @@ func TestTunnelResolverFallsBackToTCPOnUDPTimeout(t *testing.T) {
 				t.Fatalf("lookup took %s, over its 600ms budget", elapsed)
 			}
 			switch {
-			case tc.found && (err != nil || !slices.Equal(addrs, []netip.Addr{netip.AddrFrom4(testDNSAnswer)})):
-				t.Fatalf("addrs = %v, err = %v", addrs, err)
+			case tc.want != nil && (err != nil || !slices.Equal(addrs, tc.want)):
+				t.Fatalf("addrs = %v, err = %v; want %v", addrs, err, tc.want)
 			case tc.notFound && !isDNSNotFound(err):
 				t.Fatalf("err = %v, want not found", err)
-			case !tc.found && !tc.notFound && err == nil:
+			case tc.want == nil && !tc.notFound && err == nil:
 				t.Fatalf("addrs = %v, want an error", addrs)
 			}
 			for i, server := range servers {

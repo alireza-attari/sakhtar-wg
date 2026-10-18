@@ -20,15 +20,22 @@ type markedDialFunc func(context.Context, string, string, int, time.Duration) (n
 // drops most UDP to a resolver therefore took a tunnel's DNS down completely:
 // OpenDNS answered 4-8 of 20 UDP queries from wg18's exit and 20 of 20 over
 // TCP. Each server gets a slice of the budget, split between UDP and TCP.
+//
+// An answer counts only if the destination policy allows at least one of its
+// addresses. wg0's relay hijacks UDP/53 and answers 10.10.34.x for blocked
+// names whichever resolver is asked, while TCP/53 through it is clean, so a
+// poisoned UDP answer is retried over TCP and then on the next server before
+// the egress is given up.
 type tunnelResolver struct {
 	udp     []*net.Resolver
 	tcp     []*net.Resolver
 	timeout time.Duration
+	allowed func(netip.Addr) bool
 	slice   func(remaining time.Duration, attemptsLeft int) time.Duration
 }
 
-func newTunnelResolver(dial markedDialFunc, servers []string, mark int, timeout time.Duration) *tunnelResolver {
-	r := &tunnelResolver{timeout: timeout, slice: proxydial.BudgetSlice}
+func newTunnelResolver(dial markedDialFunc, servers []string, mark int, timeout time.Duration, allowed func(netip.Addr) bool) *tunnelResolver {
+	r := &tunnelResolver{timeout: timeout, allowed: allowed, slice: proxydial.BudgetSlice}
 	for _, server := range servers {
 		r.udp = append(r.udp, &net.Resolver{
 			PreferGo: true,
@@ -57,6 +64,7 @@ func (r *tunnelResolver) LookupNetIP(ctx context.Context, network, host string) 
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 	var errs []error
+	var poisoned []netip.Addr
 	for i := range r.udp {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, err)
@@ -65,10 +73,22 @@ func (r *tunnelResolver) LookupNetIP(ctx context.Context, network, host string) 
 		serverCtx, cancelServer := r.sliceOf(ctx, len(r.udp)-i)
 		addrs, err := r.lookupServer(serverCtx, i, network, host)
 		cancelServer()
-		if err == nil || isDNSNotFound(err) {
-			return addrs, err
+		switch {
+		case err == nil && r.acceptable(addrs):
+			return addrs, nil
+		case err == nil:
+			poisoned = addrs
+		case isDNSNotFound(err):
+			return nil, err
+		default:
+			errs = append(errs, err)
 		}
-		errs = append(errs, err)
+	}
+	// Every server either failed or answered only denied addresses. Hand the
+	// denied answer on rather than an error: the proxy then invalidates it and
+	// moves the connection to the next group member.
+	if poisoned != nil {
+		return poisoned, nil
 	}
 	if len(errs) == 1 {
 		return nil, errs[0]
@@ -80,10 +100,27 @@ func (r *tunnelResolver) lookupServer(ctx context.Context, server int, network, 
 	udpCtx, cancel := r.sliceOf(ctx, 2)
 	addrs, err := r.udp[server].LookupNetIP(udpCtx, network, host)
 	cancel()
-	if err == nil || !isDNSTimeout(err) || ctx.Err() != nil {
+	retry := isDNSTimeout(err) || err == nil && !r.acceptable(addrs)
+	if !retry || ctx.Err() != nil {
 		return addrs, err
 	}
-	return r.tcp[server].LookupNetIP(ctx, network, host)
+	tcpAddrs, tcpErr := r.tcp[server].LookupNetIP(ctx, network, host)
+	if tcpErr != nil && err == nil {
+		return addrs, nil
+	}
+	return tcpAddrs, tcpErr
+}
+
+func (r *tunnelResolver) acceptable(addrs []netip.Addr) bool {
+	if r.allowed == nil {
+		return true
+	}
+	for _, addr := range addrs {
+		if r.allowed(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *tunnelResolver) sliceOf(ctx context.Context, attemptsLeft int) (context.Context, context.CancelFunc) {

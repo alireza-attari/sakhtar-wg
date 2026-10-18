@@ -214,6 +214,12 @@ func (p destinationPolicy) addressAllowed(addr netip.Addr, mark int, self map[ne
 	return false
 }
 
+// answerAllowed judges a DNS answer for mark. The daemon's own addresses are
+// left to the dial path, which re-checks every candidate against them.
+func (p destinationPolicy) answerAllowed(mark int) func(netip.Addr) bool {
+	return func(addr netip.Addr) bool { return p.addressAllowed(addr, mark, nil) }
+}
+
 func compileSourceACL(c *Config) []netip.Prefix {
 	if len(c.Proxy.AllowedSourceCIDRs) == 0 {
 		return []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
