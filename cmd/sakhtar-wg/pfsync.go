@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/alireza-attari/sakhtar-wg/internal/observability"
 	internalroutesource "github.com/alireza-attari/sakhtar-wg/internal/routesource"
@@ -102,15 +103,23 @@ func (p *PfSyncer) desired(cidrs []string) []string {
 	return aggregateIPv4(in)
 }
 
+// pfSyncPushTimeout bounds one push end to end. ConnectTimeout covers only the
+// connect, so a remote that stalls after it used to hold the push forever.
+const pfSyncPushTimeout = 60 * time.Second
+
 // push sends the CSV on stdin to the forced-command key. The requested command
 // ("update") is ignored by the far end; only stdin is read.
 func (p *PfSyncer) push(ctx context.Context, csv string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, pfSyncPushTimeout)
+	defer cancel()
 	args := []string{
 		"-i", p.keyPath,
 		"-p", fmt.Sprintf("%d", p.port),
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=yes",
 		"-o", "ConnectTimeout=10",
+		"-o", "ServerAliveInterval=5",
+		"-o", "ServerAliveCountMax=2",
 	}
 	if p.knownHosts != "" {
 		args = append(args, "-o", "UserKnownHostsFile="+p.knownHosts)

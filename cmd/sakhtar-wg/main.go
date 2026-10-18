@@ -225,9 +225,10 @@ loop:
 		select {
 		case <-kernelTick.C:
 			watch.repair(wg, cfg, registry)
-		case merged := <-applyCh:
+		case queued := <-applyCh:
 			// Route-only refresh from the updater: reconcile routes, rules and the
 			// served list without disturbing the WireGuard devices.
+			merged := currentRoutes(updater, queued)
 			applyRoutes(merged)
 			if list != nil {
 				list.Reload(merged)

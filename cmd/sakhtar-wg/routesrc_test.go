@@ -141,3 +141,29 @@ func TestProbeClientNeverReusesConnections(t *testing.T) {
 		})
 	}
 }
+
+// A cycle can queue a config merged against the pre-reload base while a SIGHUP
+// is handled. Applying it would bring the old tunnels' rules back and make the
+// old config the main loop's config.
+func TestRouteRefreshAppliesTheCurrentBase(t *testing.T) {
+	before := &Config{Tunnels: []Tunnel{{Name: "wg0", Fwmark: 51, Routes: []string{"10.1.0.0/16"}}}}
+	after := &Config{Tunnels: []Tunnel{{Name: "wg18", Fwmark: 52018, Routes: []string{"10.2.0.0/16"}}}}
+	u := NewRouteUpdater(before, make(chan *Config, 1))
+	queued := u.Merge()
+	u.SetBase(after)
+	for _, tc := range []struct {
+		name    string
+		updater *RouteUpdater
+		want    string
+	}{
+		{"queued config predating the reload is re-merged", u, "wg18"},
+		{"without an updater the queued config stands", nil, "wg0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := currentRoutes(tc.updater, queued)
+			if len(got.Tunnels) != 1 || got.Tunnels[0].Name != tc.want {
+				t.Fatalf("applied tunnels = %+v, want only %s", got.Tunnels, tc.want)
+			}
+		})
+	}
+}

@@ -81,20 +81,39 @@ func NewRouteUpdater(base *Config, applyCh chan<- *Config, registries ...*observ
 
 // mirrorToPfSense pushes the given tunnel's current effective routes to pfSense
 // (best-effort; only applies when the aggregated set changed).
+//
+// The ssh push runs without u.mu: a pfSense that hangs after connecting would
+// otherwise hold it, and the main loop takes it for every SIGHUP (MergeBase)
+// and route refresh, so the kernel watchdog and signal handling would stop.
 func (u *RouteUpdater) mirrorToPfSense(ctx context.Context) {
 	u.mu.Lock()
-	defer u.mu.Unlock()
 	pf, pfFrom := u.pf, u.pfFrom
-	if pf == nil {
-		return
-	}
-	merged := u.mergeBaseLocked(u.base)
-	for _, t := range merged.Tunnels {
-		if t.Name == pfFrom {
-			pf.Reconcile(ctx, t.Routes)
-			return
+	var routes []string
+	found := false
+	if pf != nil {
+		for _, t := range u.mergeBaseLocked(u.base).Tunnels {
+			if t.Name == pfFrom {
+				routes, found = t.Routes, true
+				break
+			}
 		}
 	}
+	u.mu.Unlock()
+	if found {
+		pf.Reconcile(ctx, routes)
+	}
+}
+
+// currentRoutes is the config a route refresh applies. A cycle merges against
+// the base it started with and may queue that result while a SIGHUP is being
+// handled; applying it would put the pre-reload tunnels, rules and routes back
+// and make them the main loop's config. Re-merging takes the latest fetched
+// routes onto the updater's current base.
+func currentRoutes(u *RouteUpdater, queued *Config) *Config {
+	if u == nil {
+		return queued
+	}
+	return u.Merge()
 }
 
 // SetBase swaps in a new static config (after SIGHUP) and schedules an immediate
