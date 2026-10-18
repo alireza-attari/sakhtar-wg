@@ -635,3 +635,50 @@ func TestRouteFollowsPublishedGroupOrder(t *testing.T) {
 		t.Fatalf("static marks = %v", got)
 	}
 }
+
+// A reload that moves a rule to another tunnel while a client is still sending
+// its request must not dial through the router captured at accept: its tunnel
+// rule may be gone, and an unruled mark leaves through the WAN.
+func TestSessionRoutesWithRouterCurrentAtDial(t *testing.T) {
+	const oldMark, newMark = 51, 52018
+	configFor := func(via string) *Config {
+		cfg := testProxyConfig(4, 0)
+		cfg.Tunnels = []Tunnel{{Name: "wg0", Fwmark: oldMark}, {Name: "wg18", Fwmark: newMark}}
+		cfg.Proxy.Rules = []Rule{{Via: via, Suffixes: []string{"moved.example"}}}
+		return cfg
+	}
+	srv := NewServer(configFor("wg0"), nil)
+	dialed := make(chan int, 4)
+	srv.dial = func(_ context.Context, _, _ string, mark int, _ time.Duration) (net.Conn, error) {
+		dialed <- mark
+		return nil, io.ErrClosedPipe
+	}
+	captured := srv.rt.Load()
+	client, server := net.Pipe()
+	defer client.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.handleHTTP(ctx, &ownedSession{client: server, cancel: cancel}, server, captured, rejectionKey{Protocol: protocolHTTP, ListenerClass: classLocal})
+	}()
+
+	srv.Reload(configFor("wg18"), nil)
+	srv.rt.Load().resolvers[newMark] = resolvercache.ResolverFunc(func(context.Context, resolvercache.Query) (resolvercache.Result, error) {
+		return resolvercache.Result{Addrs: []netip.Addr{netip.MustParseAddr("93.184.216.34")}, ExpiresAt: time.Now().Add(time.Minute), RCode: resolvercache.RCodeSuccess}, nil
+	})
+	if _, err := client.Write([]byte("GET / HTTP/1.1\r\nHost: moved.example\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case mark := <-dialed:
+		if mark != newMark {
+			t.Fatalf("dialed mark %d (router captured at accept), want %d", mark, newMark)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no dial")
+	}
+	cancel()
+	<-done
+}

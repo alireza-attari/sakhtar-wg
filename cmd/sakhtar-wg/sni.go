@@ -476,6 +476,13 @@ func peekHTTPHostLimit(r io.Reader, limit int64) (string, []byte, error) {
 }
 
 func (s *Server) pipe(ctx context.Context, session *ownedSession, client net.Conn, prefix []byte, host string, isIP bool, port string, rt *router, labels rejectionKey) {
+	// Route with the generation that is current now, not the one captured at
+	// accept: a reload during the client's handshake may have deleted the old
+	// router's tunnel or moved its mark, and a mark with no policy rule left
+	// routes through the main table, out of the WAN.
+	if current := s.rt.Load(); current != nil {
+		rt = current
+	}
 	marks := rt.route(host).marks()
 	mark := marks[0]
 	self := s.self.Load()
