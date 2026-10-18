@@ -75,8 +75,7 @@ func startActiveProbe(ctx context.Context, config *Config, registry *observabili
 
 	probers := make([]*internalhealth.Prober, 0, len(targets))
 	for _, target := range targets {
-		client := (&RouteUpdater{}).httpClient(config, target)
-		go func() { <-ctx.Done(); client.CloseIdleConnections() }()
+		client := probeHTTPClient(config, target)
 		prober := internalhealth.NewProber(internalhealth.ProbeConfig{
 			Interval:      time.Duration(config.HealthProbe.Interval) * time.Second,
 			Timeout:       time.Duration(config.HealthProbe.Timeout) * time.Second,

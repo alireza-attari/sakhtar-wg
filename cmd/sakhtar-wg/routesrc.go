@@ -349,6 +349,17 @@ func (u *RouteUpdater) httpClient(base *Config, via string) *http.Client {
 	return &http.Client{Transport: tr, Timeout: fetchTimeout}
 }
 
+// probeHTTPClient is httpClient without connection reuse. A probe answers "can
+// this tunnel reach the endpoint now?", and a pooled connection answers a
+// different question: it skips the marked DNS lookup and the TCP dial, and one
+// opened while the tunnel still worked can keep succeeding after the exit has
+// stopped resolving or forwarding.
+func probeHTTPClient(base *Config, via string) *http.Client {
+	client := (&RouteUpdater{}).httpClient(base, via)
+	client.Transport.(*http.Transport).DisableKeepAlives = true
+	return client
+}
+
 // --- parsers ---
 
 // parseCIDRLines reads a plain-text list of one CIDR (or bare IP) per line,

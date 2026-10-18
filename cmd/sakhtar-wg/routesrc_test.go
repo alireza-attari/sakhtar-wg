@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -116,4 +117,27 @@ func FuzzParseRIPEPrefixes(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _ = parseRIPEPrefixes(data)
 	})
+}
+
+func TestProbeClientNeverReusesConnections(t *testing.T) {
+	cfg := &Config{Tunnels: []Tunnel{{Name: "wg0", Fwmark: 51}}}
+	for _, tc := range []struct {
+		name      string
+		client    *http.Client
+		keepAlive bool
+	}{
+		{"route fetch reuses connections", (&RouteUpdater{}).httpClient(cfg, "wg0"), true},
+		{"probe through tunnel dials fresh", probeHTTPClient(cfg, "wg0"), false},
+		{"direct probe dials fresh", probeHTTPClient(cfg, "direct"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport, ok := tc.client.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("transport = %T", tc.client.Transport)
+			}
+			if got := !transport.DisableKeepAlives; got != tc.keepAlive {
+				t.Fatalf("keep-alive = %t, want %t", got, tc.keepAlive)
+			}
+		})
+	}
 }
