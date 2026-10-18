@@ -122,16 +122,13 @@ func newRouterGeneration(c *Config, hm *HealthMonitor, generation uint64, dial f
 	cache := newDNSCacheForConfig(c, generation)
 	resolverTimeout := durationSeconds(c.Proxy.DNSResolverTimeout, defaultDNSResolverTimeout)
 	localTTL := durationSeconds(c.Proxy.DNSCacheTTL, defaultDNSMaxPositiveTTL)
-	resolverAddress := c.Proxy.Resolver
-	if resolverAddress == "" {
-		resolverAddress = "1.1.1.1:53"
-	}
+	servers := c.Proxy.Resolver.orDefault()
 	resolvers := map[int]resolvercache.Resolver{
 		0: &resolvercache.NetResolver{Resolver: net.DefaultResolver, LocalTTL: localTTL},
 	}
 	for _, tunnel := range c.Tunnels {
 		resolvers[tunnel.Fwmark] = &resolvercache.NetResolver{
-			Resolver: newTunnelResolver(dial, []string{resolverAddress}, tunnel.Fwmark, resolverTimeout),
+			Resolver: newTunnelResolver(dial, servers, tunnel.Fwmark, resolverTimeout),
 			LocalTTL: localTTL,
 		}
 	}

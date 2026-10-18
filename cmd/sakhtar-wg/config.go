@@ -48,6 +48,48 @@ const (
 	maxConnectAttemptCap               = 64
 )
 
+const (
+	defaultResolver = "1.1.1.1:53"
+	// maxResolvers bounds proxy.resolver: every listed server gets a slice of
+	// dns_resolver_timeout, so a long list leaves each too little to answer.
+	maxResolvers = 4
+)
+
+// ResolverList is proxy.resolver. YAML accepts a single host:port string, as
+// configs always have, or a list of them.
+type ResolverList []string
+
+func (l *ResolverList) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		var one string
+		if err := node.Decode(&one); err != nil {
+			return err
+		}
+		*l = nil
+		if one != "" {
+			*l = ResolverList{one}
+		}
+		return nil
+	case yaml.SequenceNode:
+		var many []string
+		if err := node.Decode(&many); err != nil {
+			return err
+		}
+		*l = many
+		return nil
+	default:
+		return fmt.Errorf("line %d: proxy.resolver must be host:port or a list of host:port", node.Line)
+	}
+}
+
+func (l ResolverList) orDefault() ResolverList {
+	if len(l) == 0 {
+		return ResolverList{defaultResolver}
+	}
+	return l
+}
+
 const maxDurationSeconds = int64(math.MaxInt64) / int64(time.Second)
 
 var interfaceNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
@@ -223,8 +265,9 @@ type Proxy struct {
 	// Resolver is the upstream DNS used to resolve a tunnelled backend's real
 	// address, queried THROUGH that tunnel. It must not be the rewriting resolver
 	// (AdGuard) that points the domain back at this proxy, or the proxy would dial
-	// itself. host:port; empty => 1.1.1.1:53.
-	Resolver string `yaml:"resolver"`
+	// itself. host:port, or a list of them tried in order until one answers
+	// (at most maxResolvers); empty => 1.1.1.1:53.
+	Resolver ResolverList `yaml:"resolver"`
 	// DNSCacheTTL is the local positive lifetime used because net.Resolver does
 	// not expose authoritative record TTLs. It is clamped by the min/max policy.
 	DNSCacheTTL            int    `yaml:"dns_cache_ttl"`
@@ -655,8 +698,18 @@ func (c *Config) validate() error {
 			return fmt.Errorf("proxy.http_listen %q is wildcard or non-loopback; proxy.allowed_source_cidrs is required and must be non-empty", c.Proxy.HTTPListen)
 		}
 	}
-	if err := validateHostPort(c.Proxy.Resolver, false); err != nil {
-		return fmt.Errorf("proxy.resolver: %w", err)
+	if len(c.Proxy.Resolver) > maxResolvers {
+		return fmt.Errorf("proxy.resolver lists %d resolvers; at most %d are allowed", len(c.Proxy.Resolver), maxResolvers)
+	}
+	seenResolver := map[string]bool{}
+	for _, resolver := range c.Proxy.Resolver {
+		if err := validateHostPort(resolver, false); err != nil {
+			return fmt.Errorf("proxy.resolver: %w", err)
+		}
+		if seenResolver[resolver] {
+			return fmt.Errorf("proxy.resolver lists %q twice", resolver)
+		}
+		seenResolver[resolver] = true
 	}
 	for _, cidr := range c.Proxy.DestinationPolicy.DirectAllowCIDRs {
 		if _, err := parsePolicyPrefix(cidr); err != nil {
@@ -833,9 +886,7 @@ func (c *Config) normalize() {
 	if c.Proxy.Default == "" {
 		c.Proxy.Default = "direct"
 	}
-	if c.Proxy.Resolver == "" {
-		c.Proxy.Resolver = "1.1.1.1:53"
-	}
+	c.Proxy.Resolver = c.Proxy.Resolver.orDefault()
 	for i := range c.Proxy.Rules {
 		for j, s := range c.Proxy.Rules[i].Suffixes {
 			c.Proxy.Rules[i].Suffixes[j] = strings.TrimPrefix(s, ".")

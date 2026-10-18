@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -119,6 +120,10 @@ func TestParseConfigRejectsInvalidInput(t *testing.T) {
 		{"bad route", strings.Replace(valid, "10.10.1.1/24", "bad", 1), "route \"bad\""},
 		{"bad listener", strings.Replace(valid, `https_listen: ":443"`, `https_listen: "443"`, 1), "proxy.https_listen"},
 		{"bad resolver", strings.Replace(valid, "1.1.1.1:53", "1.1.1.1", 1), "proxy.resolver"},
+		{"bad resolver in list", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: [1.1.1.1:53, 8.8.8.8]", 1), "proxy.resolver"},
+		{"duplicate resolver", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: [1.1.1.1:53, 1.1.1.1:53]", 1), "twice"},
+		{"too many resolvers", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: [1.1.1.1:53, 8.8.8.8:53, 9.9.9.9:53, 1.0.0.1:53, 8.8.4.4:53]", 1), "at most 4"},
+		{"resolver mapping", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: {host: 1.1.1.1}", 1), "proxy.resolver must be"},
 		{"negative dial timeout", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: 1.1.1.1:53\n  dial_timeout: -1", 1), "dial_timeout"},
 		{"bad positive capacity", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: 1.1.1.1:53\n  dns_positive_capacity: -1", 1), "dns_positive_capacity"},
 		{"bad negative capacity", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: 1.1.1.1:53\n  dns_negative_capacity: -1", 1), "dns_negative_capacity"},
@@ -216,4 +221,29 @@ func FuzzLoadConfig(f *testing.F) {
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		_, _ = parseConfig(raw)
 	})
+}
+
+// proxy.resolver used to be one string; existing configs must keep parsing.
+func TestProxyResolverAcceptsStringOrList(t *testing.T) {
+	valid := validConfigYAML()
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want ResolverList
+	}{
+		{"single string", "resolver: 1.1.1.1:53", ResolverList{"1.1.1.1:53"}},
+		{"empty string takes the default", `resolver: ""`, ResolverList{"1.1.1.1:53"}},
+		{"list keeps its order", "resolver: [208.67.222.222:53, 1.1.1.1:53]", ResolverList{"208.67.222.222:53", "1.1.1.1:53"}},
+		{"block list", "resolver:\n    - 9.9.9.9:53\n    - 8.8.8.8:53", ResolverList{"9.9.9.9:53", "8.8.8.8:53"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := parseConfig([]byte(strings.Replace(valid, "resolver: 1.1.1.1:53", tc.yaml, 1)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(cfg.Proxy.Resolver, tc.want) {
+				t.Fatalf("resolver = %v, want %v", cfg.Proxy.Resolver, tc.want)
+			}
+		})
+	}
 }

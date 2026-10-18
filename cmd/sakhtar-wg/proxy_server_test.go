@@ -23,7 +23,7 @@ func testProxyConfig(maximum, perSource int) *Config {
 	return &Config{Proxy: Proxy{
 		HTTPListen:              "127.0.0.1:0",
 		Default:                 "direct",
-		Resolver:                "1.1.1.1:53",
+		Resolver:                ResolverList{"1.1.1.1:53"},
 		DNSCacheTTL:             300,
 		MaxConnections:          maximum,
 		MaxConnectionsPerSource: perSource,

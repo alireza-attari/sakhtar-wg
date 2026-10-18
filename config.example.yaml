@@ -152,8 +152,11 @@ proxy:
   dns_resolver_timeout: 5
   # Upstream DNS for resolving a tunnelled backend's real IP, queried through the
   # tunnel. Must NOT be the AdGuard that rewrites these domains to this proxy, or
-  # the proxy would dial itself.
+  # the proxy would dial itself. Either one host:port or a list tried in order
+  # until one answers (at most 4; each gets a slice of dns_resolver_timeout).
+  # Each server is asked over UDP and, when UDP times out, over TCP.
   resolver: 1.1.1.1:53
+  # resolver: [1.1.1.1:53, 9.9.9.9:53]
   # All policy-allowed A/AAAA results participate. The starting address rotates
   # per request and at most this many literal-IP connects share dial_timeout.
   address_family_strategy: interleave  # interleave | ipv4_first | ipv6_first

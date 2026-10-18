@@ -290,10 +290,6 @@ func (u *RouteUpdater) fetchSource(ctx context.Context, base *Config, src RouteS
 // the SNI proxy reaches a filtered backend, avoiding any AdGuard rewrite loop.
 func (u *RouteUpdater) httpClient(base *Config, via string) *http.Client {
 	mark := base.markFor(via)
-	resolver := base.Proxy.Resolver
-	if resolver == "" {
-		resolver = "1.1.1.1:53"
-	}
 	resolverTimeout := durationSeconds(base.Proxy.DNSResolverTimeout, defaultDNSResolverTimeout)
 	attemptCap := positiveOr(base.Proxy.ConnectAttemptCap, defaultConnectAttemptCap)
 	strategy := proxydial.AddressFamilyStrategy(base.Proxy.AddressFamilyStrategy)
@@ -303,7 +299,7 @@ func (u *RouteUpdater) httpClient(base *Config, via string) *http.Client {
 	selector := &proxydial.RotatingSelector{Strategy: strategy, MaxAttempts: attemptCap}
 	destination := newDestinationPolicy(base)
 	noSelfAddresses := map[netip.Addr]struct{}{}
-	markedResolver := newTunnelResolver(dialMarkedContext, []string{resolver}, mark, resolverTimeout)
+	markedResolver := newTunnelResolver(dialMarkedContext, base.Proxy.Resolver.orDefault(), mark, resolverTimeout)
 	tr := &http.Transport{
 		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: 15 * time.Second,

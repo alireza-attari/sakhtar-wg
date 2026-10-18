@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	resolvercache "github.com/alireza-attari/sakhtar-wg/internal/dns"
@@ -85,7 +86,7 @@ func newDNSCacheForConfig(c *Config, generation uint64) *dnsCache {
 		StaleWindow:         time.Duration(staleWindow) * time.Second,
 		StalePolicy:         resolvercache.StalePolicy(stalePolicy),
 		ResolverTimeout:     time.Duration(resolverTimeout) * time.Second,
-	}, generation, c.Proxy.Resolver, tunnelNamesByMark(c))
+	}, generation, strings.Join(c.Proxy.Resolver.orDefault(), ","), tunnelNamesByMark(c))
 }
 
 func positiveOr(value, fallback int) int {
