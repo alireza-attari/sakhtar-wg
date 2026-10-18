@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -224,6 +225,10 @@ type Tunnel struct {
 	// listener.
 	RouteSources []RouteSource `yaml:"route_sources"`
 	Peer         Peer          `yaml:"peer"`
+	// Resolver overrides proxy.resolver for lookups through this tunnel, for an
+	// exit whose path tampers with the shared resolver (wg0's relay hijacks
+	// UDP/53). Same forms as proxy.resolver; empty => proxy.resolver.
+	Resolver ResolverList `yaml:"resolver"`
 }
 
 // RouteSource is one periodically-fetched CIDR list feeding a tunnel's routes.
@@ -698,18 +703,13 @@ func (c *Config) validate() error {
 			return fmt.Errorf("proxy.http_listen %q is wildcard or non-loopback; proxy.allowed_source_cidrs is required and must be non-empty", c.Proxy.HTTPListen)
 		}
 	}
-	if len(c.Proxy.Resolver) > maxResolvers {
-		return fmt.Errorf("proxy.resolver lists %d resolvers; at most %d are allowed", len(c.Proxy.Resolver), maxResolvers)
+	if err := validateResolvers("proxy.resolver", c.Proxy.Resolver); err != nil {
+		return err
 	}
-	seenResolver := map[string]bool{}
-	for _, resolver := range c.Proxy.Resolver {
-		if err := validateHostPort(resolver, false); err != nil {
-			return fmt.Errorf("proxy.resolver: %w", err)
+	for _, tunnel := range c.Tunnels {
+		if err := validateResolvers("tunnels["+tunnel.Name+"].resolver", tunnel.Resolver); err != nil {
+			return err
 		}
-		if seenResolver[resolver] {
-			return fmt.Errorf("proxy.resolver lists %q twice", resolver)
-		}
-		seenResolver[resolver] = true
 	}
 	for _, cidr := range c.Proxy.DestinationPolicy.DirectAllowCIDRs {
 		if _, err := parsePolicyPrefix(cidr); err != nil {
@@ -895,6 +895,42 @@ func (c *Config) normalize() {
 }
 
 // markFor returns the SO_MARK to use for an egress name ("direct" => 0).
+func validateResolvers(field string, resolvers ResolverList) error {
+	if len(resolvers) > maxResolvers {
+		return fmt.Errorf("%s lists %d resolvers; at most %d are allowed", field, len(resolvers), maxResolvers)
+	}
+	seen := map[string]bool{}
+	for _, resolver := range resolvers {
+		if err := validateHostPort(resolver, false); err != nil {
+			return fmt.Errorf("%s: %w", field, err)
+		}
+		if seen[resolver] {
+			return fmt.Errorf("%s lists %q twice", field, resolver)
+		}
+		seen[resolver] = true
+	}
+	return nil
+}
+
+// sameTunnelSpec compares what the kernel and WireGuard device are built from.
+// The resolver override only changes how the proxy resolves through the
+// tunnel, so editing it must not reconfigure the device and cost a handshake.
+func sameTunnelSpec(a, b Tunnel) bool {
+	a.Resolver, b.Resolver = nil, nil
+	return reflect.DeepEqual(a, b)
+}
+
+// resolversFor is the resolver list for lookups through mark: the tunnel's own
+// override, else proxy.resolver.
+func (c *Config) resolversFor(mark int) ResolverList {
+	for _, tunnel := range c.Tunnels {
+		if tunnel.Fwmark == mark && len(tunnel.Resolver) > 0 {
+			return tunnel.Resolver
+		}
+	}
+	return c.Proxy.Resolver.orDefault()
+}
+
 func (c *Config) markFor(via string) int {
 	if via == "direct" || via == "" {
 		return 0

@@ -123,6 +123,7 @@ func TestParseConfigRejectsInvalidInput(t *testing.T) {
 		{"bad resolver in list", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: [1.1.1.1:53, 8.8.8.8]", 1), "proxy.resolver"},
 		{"duplicate resolver", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: [1.1.1.1:53, 1.1.1.1:53]", 1), "twice"},
 		{"too many resolvers", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: [1.1.1.1:53, 8.8.8.8:53, 9.9.9.9:53, 1.0.0.1:53, 8.8.4.4:53]", 1), "at most 4"},
+		{"bad tunnel resolver", strings.Replace(valid, "fwmark: 51", "fwmark: 51\n    resolver: 208.67.222.222", 1), "tunnels[wg0].resolver"},
 		{"resolver mapping", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: {host: 1.1.1.1}", 1), "proxy.resolver must be"},
 		{"negative dial timeout", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: 1.1.1.1:53\n  dial_timeout: -1", 1), "dial_timeout"},
 		{"bad positive capacity", strings.Replace(valid, "resolver: 1.1.1.1:53", "resolver: 1.1.1.1:53\n  dns_positive_capacity: -1", 1), "dns_positive_capacity"},
@@ -243,6 +244,57 @@ func TestProxyResolverAcceptsStringOrList(t *testing.T) {
 			}
 			if !slices.Equal(cfg.Proxy.Resolver, tc.want) {
 				t.Fatalf("resolver = %v, want %v", cfg.Proxy.Resolver, tc.want)
+			}
+		})
+	}
+}
+
+// wg0's relay hijacks UDP/53, so wg0 alone may need a resolver on another
+// port; the other tunnels keep proxy.resolver.
+func TestTunnelResolverOverride(t *testing.T) {
+	base := validConfigYAML()
+	for _, tc := range []struct {
+		name     string
+		override string
+		want     ResolverList
+	}{
+		{"no override uses proxy.resolver", "", ResolverList{"1.1.1.1:53"}},
+		{"single override", "\n    resolver: 208.67.222.222:5353", ResolverList{"208.67.222.222:5353"}},
+		{"list override", "\n    resolver: [208.67.222.222:5353, 1.1.1.1:53]", ResolverList{"208.67.222.222:5353", "1.1.1.1:53"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := parseConfig([]byte(strings.Replace(base, "fwmark: 51", "fwmark: 51"+tc.override, 1)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.resolversFor(51); !slices.Equal(got, tc.want) {
+				t.Fatalf("resolversFor(wg0) = %v, want %v", got, tc.want)
+			}
+			if got := cfg.resolversFor(99); !slices.Equal(got, ResolverList{"1.1.1.1:53"}) {
+				t.Fatalf("resolversFor(unknown) = %v", got)
+			}
+		})
+	}
+}
+
+// Editing only a tunnel's resolver must not reconfigure its WireGuard device.
+func TestSameTunnelSpecIgnoresResolver(t *testing.T) {
+	base := Tunnel{Name: "wg0", Fwmark: 51, Routes: []string{"10.0.0.0/8"}}
+	for _, tc := range []struct {
+		name string
+		edit func(*Tunnel)
+		same bool
+	}{
+		{"resolver change", func(t *Tunnel) { t.Resolver = ResolverList{"208.67.222.222:5353"} }, true},
+		{"fwmark change", func(t *Tunnel) { t.Fwmark = 52 }, false},
+		{"route change", func(t *Tunnel) { t.Routes = []string{"10.1.0.0/16"} }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next := base
+			next.Routes = append([]string(nil), base.Routes...)
+			tc.edit(&next)
+			if got := sameTunnelSpec(base, next); got != tc.same {
+				t.Fatalf("sameTunnelSpec = %t, want %t", got, tc.same)
 			}
 		})
 	}

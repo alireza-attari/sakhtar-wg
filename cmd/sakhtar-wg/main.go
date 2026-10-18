@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"syscall"
 	"time"
@@ -358,7 +357,7 @@ func applyReload(wg *wgctrl.Client, old, next *Config, srv *Server, hm *HealthMo
 	for _, t := range next.Tunnels {
 		keep[t.Name] = true
 		prev, existed := oldByName[t.Name]
-		if existed && reflect.DeepEqual(prev, t) {
+		if existed && sameTunnelSpec(prev, t) {
 			// Unchanged CONFIG is not the same as unchanged KERNEL. This used to
 			// `continue` outright, which made reload structurally unable to
 			// repair anything the kernel had lost — and on 2026-08-09 that was

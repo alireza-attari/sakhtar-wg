@@ -58,6 +58,10 @@ tunnels:
     # Opt in only for an otherwise-empty WireGuard link whose key/peer config
     # already exactly matches this tunnel; adopted links are never deleted.
     adopt_existing: false
+    # Optional: resolvers for lookups THROUGH this tunnel, overriding
+    # proxy.resolver (same forms). For an exit whose path tampers with plain
+    # DNS, e.g. one that hijacks UDP/53: point it at another port.
+    # resolver: 208.67.222.222:5353
     # Static L3 routes are retained even when a remote route source is
     # unavailable. The ranges below are reserved for documentation.
     routes:
