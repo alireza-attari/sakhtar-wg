@@ -28,6 +28,12 @@ const maxPeek = defaultMaxClientHelloBytes
 
 var errDestinationDenied = errors.New("destination denied by policy")
 
+// errDeniedAnswer is a resolver answer made only of addresses the destination
+// policy refuses. Through a tunnel that is a poisoned answer far more often than
+// a real one (Iran's resolvers answer 10.10.34.36 for blocked names), so it is a
+// failure of that egress's resolver, not a verdict on the destination.
+var errDeniedAnswer = fmt.Errorf("%w: resolver answered only denied addresses", errDestinationDenied)
+
 type router struct {
 	def                     markRef
 	dialTimeout             time.Duration
@@ -524,7 +530,10 @@ func (s *Server) backendCandidates(ctx context.Context, host string, isIP bool, 
 		return rt.destination.addressAllowed(candidate, mark, self)
 	})
 	if len(allowed) == 0 {
-		return nil, errDestinationDenied
+		// Without the invalidation a poisoned answer is served from the cache
+		// for its whole TTL, denying every later connection to the host.
+		rt.dns.invalidate(mark, host)
+		return nil, errDeniedAnswer
 	}
 	return allowed, nil
 }

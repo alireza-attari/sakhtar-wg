@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -438,4 +439,47 @@ func TestDialFailureInvalidatesCachedAnswer(t *testing.T) {
 	// Well inside the 300s TTL: without the invalidation this would be a cache hit.
 	request()
 	waitFor(t, 2*time.Second, func() bool { return resolves.Load() == 2 })
+}
+
+// 10.10.34.36 is what Iran's resolvers answer for a blocked name. The policy
+// denies it, and it must not stay cached: on 2026-10-18 a poisoned YouTube
+// answer through wg18 kept denying YouTube for the rest of its TTL.
+func TestDeniedAnswerIsNotCached(t *testing.T) {
+	const mark = 0x99
+	for _, tc := range []struct {
+		name        string
+		answer      []string
+		wantDenied  bool
+		wantResolve int32
+	}{
+		{"poisoned private answer re-resolves", []string{"10.10.34.36"}, true, 2},
+		{"loopback answer re-resolves", []string{"127.0.0.1"}, true, 2},
+		{"mixed answer keeps its public address cached", []string{"10.10.34.36", "93.184.216.34"}, false, 1},
+		{"public answer stays cached", []string{"93.184.216.34"}, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testProxyConfig(4, 0)
+			cfg.Tunnels = []Tunnel{{Name: "wg18", Fwmark: mark}}
+			srv := NewServer(cfg, nil)
+			rt := srv.rt.Load()
+			var resolves atomic.Int32
+			rt.resolvers[mark] = resolvercache.ResolverFunc(func(context.Context, resolvercache.Query) (resolvercache.Result, error) {
+				resolves.Add(1)
+				addrs := make([]netip.Addr, 0, len(tc.answer))
+				for _, raw := range tc.answer {
+					addrs = append(addrs, netip.MustParseAddr(raw))
+				}
+				return resolvercache.Result{Addrs: addrs, ExpiresAt: time.Now().Add(5 * time.Minute), RCode: resolvercache.RCodeSuccess}, nil
+			})
+			for range 2 {
+				candidates, err := srv.backendCandidates(context.Background(), "www.youtube.com", false, mark, rt, map[netip.Addr]struct{}{})
+				if denied := errors.Is(err, errDestinationDenied); denied != tc.wantDenied {
+					t.Fatalf("candidates = %v, err = %v; denied = %t, want %t", candidates, err, denied, tc.wantDenied)
+				}
+			}
+			if got := resolves.Load(); got != tc.wantResolve {
+				t.Fatalf("resolves = %d, want %d", got, tc.wantResolve)
+			}
+		})
+	}
 }
