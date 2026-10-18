@@ -104,7 +104,7 @@ func BenchmarkResolveAndDial(b *testing.B) {
 	}
 }
 
-func TestAttemptTimeoutSlicesRemainingBudget(t *testing.T) {
+func TestBudgetSliceSplitsRemainingBudget(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		remaining    time.Duration
@@ -118,8 +118,8 @@ func TestAttemptTimeoutSlicesRemainingBudget(t *testing.T) {
 		{"exhausted budget", 0, 3, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := attemptTimeout(tc.remaining, tc.attemptsLeft); got != tc.want {
-				t.Fatalf("attemptTimeout(%s, %d) = %s, want %s", tc.remaining, tc.attemptsLeft, got, tc.want)
+			if got := BudgetSlice(tc.remaining, tc.attemptsLeft); got != tc.want {
+				t.Fatalf("BudgetSlice(%s, %d) = %s, want %s", tc.remaining, tc.attemptsLeft, got, tc.want)
 			}
 		})
 	}

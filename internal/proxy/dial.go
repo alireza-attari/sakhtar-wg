@@ -179,10 +179,10 @@ func (m *ConnectMetrics) Snapshot() map[string]uint64 {
 // retransmission timeout, which would fail a candidate whose first SYN was lost.
 var minAttemptTimeout = time.Second
 
-// attemptTimeout splits what is left of the budget evenly over the attempts
-// still to make, Happy-Eyeballs style: a blackholed candidate costs its slice
-// rather than the whole budget, and the last attempt gets everything left.
-func attemptTimeout(remaining time.Duration, attemptsLeft int) time.Duration {
+// BudgetSlice splits what is left of a budget evenly over the attempts still to
+// make, Happy-Eyeballs style: a blackholed candidate costs its slice rather
+// than the whole budget, and the last attempt gets everything left.
+func BudgetSlice(remaining time.Duration, attemptsLeft int) time.Duration {
 	if remaining <= 0 {
 		return 0
 	}
@@ -195,7 +195,7 @@ func attemptTimeout(remaining time.Duration, attemptsLeft int) time.Duration {
 
 // DialCandidates retries only the already validated IP literals supplied by
 // the selector. The caller owns ctx's total deadline; each attempt gets a slice
-// of what remains of it (attemptTimeout) and never a new budget. The returned
+// of what remains of it (BudgetSlice) and never a new budget. The returned
 // count is useful for bounded observability and tests.
 func DialCandidates(ctx context.Context, candidates []netip.Addr, port string, attemptCap int, egress string, dial DialFunc, metrics *ConnectMetrics) (net.Conn, int, error) {
 	if attemptCap <= 0 {
@@ -218,7 +218,7 @@ func DialCandidates(ctx context.Context, candidates []netip.Addr, port string, a
 		attempts++
 		attemptCtx, cancel := ctx, context.CancelFunc(func() {})
 		if deadline, ok := ctx.Deadline(); ok {
-			attemptCtx, cancel = context.WithTimeout(ctx, attemptTimeout(time.Until(deadline), len(candidates)-i))
+			attemptCtx, cancel = context.WithTimeout(ctx, BudgetSlice(time.Until(deadline), len(candidates)-i))
 		}
 		conn, err := dial(attemptCtx, "tcp", address)
 		cancel()

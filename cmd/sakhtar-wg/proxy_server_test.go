@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	resolvercache "github.com/alireza-attari/sakhtar-wg/internal/dns"
+	internalhealth "github.com/alireza-attari/sakhtar-wg/internal/health"
 )
 
 func testProxyConfig(maximum, perSource int) *Config {
@@ -535,5 +536,102 @@ func TestMarkedEgressDialsIPv4Only(t *testing.T) {
 				t.Fatalf("resolves = %d, want %d", got, tc.wantResolve)
 			}
 		})
+	}
+}
+
+// A connection used to read one mark and give up when that egress failed, so a
+// dead or poisoned group member failed every connection routed to it while the
+// next member could have carried them.
+func TestDialFailsOverToNextGroupMember(t *testing.T) {
+	const wg0, wg18, wgtr = 51, 52018, 52090
+	const public, poisoned = "93.184.216.34", "10.10.34.36"
+	errConnRefused := errors.New("connection refused")
+	for _, tc := range []struct {
+		name       string
+		answers    map[int]string
+		dialErr    map[int]error
+		wantMark   int
+		wantDialed []int
+		wantDenied bool
+	}{
+		{name: "healthy first member is the only one dialed", answers: map[int]string{wg0: public, wg18: public}, wantMark: wg0, wantDialed: []int{wg0}},
+		{name: "dial error moves to the next member", answers: map[int]string{wg0: public, wg18: public}, dialErr: map[int]error{wg0: errConnRefused}, wantMark: wg18, wantDialed: []int{wg0, wg18}},
+		{name: "poisoned answer moves to the next member", answers: map[int]string{wg0: poisoned, wg18: public}, wantMark: wg18, wantDialed: []int{wg18}},
+		{name: "skips two failing members", answers: map[int]string{wg0: poisoned, wg18: public, wgtr: public}, dialErr: map[int]error{wg18: errConnRefused}, wantMark: wgtr, wantDialed: []int{wg18, wgtr}},
+		{name: "every member denied is a denial", answers: map[int]string{wg0: poisoned, wg18: poisoned, wgtr: poisoned}, wantDenied: true},
+		{name: "any dial error makes it a dial error", answers: map[int]string{wg0: poisoned, wg18: public, wgtr: poisoned}, dialErr: map[int]error{wg18: errConnRefused}, wantDialed: []int{wg18}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testProxyConfig(4, 0)
+			cfg.Tunnels = []Tunnel{{Name: "wg0", Fwmark: wg0}, {Name: "wg18", Fwmark: wg18}, {Name: "wgtr", Fwmark: wgtr}}
+			srv := NewServer(cfg, nil)
+			rt := srv.rt.Load()
+			for mark, answer := range tc.answers {
+				addr := netip.MustParseAddr(answer)
+				rt.resolvers[mark] = resolvercache.ResolverFunc(func(context.Context, resolvercache.Query) (resolvercache.Result, error) {
+					return resolvercache.Result{Addrs: []netip.Addr{addr}, ExpiresAt: time.Now().Add(5 * time.Minute), RCode: resolvercache.RCodeSuccess}, nil
+				})
+			}
+			var dialed []int
+			var peer net.Conn
+			srv.dial = func(_ context.Context, _, _ string, mark int, _ time.Duration) (net.Conn, error) {
+				dialed = append(dialed, mark)
+				if err := tc.dialErr[mark]; err != nil {
+					return nil, err
+				}
+				client, server := net.Pipe()
+				peer = server
+				return client, nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			conn, err := srv.dialEgresses(ctx, "www.youtube.com", false, "443", []int{wg0, wg18, wgtr}, rt, map[netip.Addr]struct{}{})
+			if conn != nil {
+				_ = conn.Close()
+				_ = peer.Close()
+			}
+			if !slices.Equal(dialed, tc.wantDialed) {
+				t.Fatalf("dialed marks = %v, want %v", dialed, tc.wantDialed)
+			}
+			switch {
+			case tc.wantMark != 0 && err != nil:
+				t.Fatalf("dial failed: %v", err)
+			case tc.wantMark != 0 && dialed[len(dialed)-1] != tc.wantMark:
+				t.Fatalf("connected through %d, want %d", dialed[len(dialed)-1], tc.wantMark)
+			case tc.wantMark == 0 && err == nil:
+				t.Fatal("dial succeeded, want failure")
+			case tc.wantMark == 0 && errors.Is(err, errDestinationDenied) != tc.wantDenied:
+				t.Fatalf("err = %v; denied = %t, want %t", err, errors.Is(err, errDestinationDenied), tc.wantDenied)
+			}
+		})
+	}
+}
+
+func TestRouteFollowsPublishedGroupOrder(t *testing.T) {
+	var active atomic.Int32
+	var order atomic.Pointer[[]internalhealth.FwMark]
+	ref := markRef{dyn: &active, order: &order}
+	for _, tc := range []struct {
+		name      string
+		active    int32
+		published []internalhealth.FwMark
+		want      []int
+	}{
+		{"before the first poll", 51, nil, []int{51}},
+		{"eligible members in order", 51, []internalhealth.FwMark{51, 52018}, []int{51, 52018}},
+		{"after failover", 52018, []internalhealth.FwMark{52018}, []int{52018}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			active.Store(tc.active)
+			if tc.published != nil {
+				order.Store(&tc.published)
+			}
+			if got := ref.marks(); !slices.Equal(got, tc.want) {
+				t.Fatalf("marks = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if got := (markRef{static: 7}).marks(); !slices.Equal(got, []int{7}) {
+		t.Fatalf("static marks = %v", got)
 	}
 }

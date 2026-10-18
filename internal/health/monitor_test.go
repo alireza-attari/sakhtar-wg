@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -157,17 +158,18 @@ func TestGroupSelectionRequiresPassingProbe(t *testing.T) {
 		mark    int32
 		state   string
 		reason  string
+		order   []FwMark
 	}{
-		{name: "no probe result yet falls back to handshake", mark: 51, state: "ready", reason: ReasonRecentHandshake},
-		{name: "first failure is believed without history", probes: []probe{{"wg0", false}, {"wg18", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing},
-		{name: "one success does not fail back", advance: 30 * time.Second, probes: []probe{{"wg0", true}, {"wg18", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing},
-		{name: "two successes do not fail back", advance: 30 * time.Second, probes: []probe{{"wg0", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing},
-		{name: "third consecutive success fails back", advance: 30 * time.Second, probes: []probe{{"wg0", true}, {"wg18", true}}, mark: 51, state: "ready", reason: ReasonRecentHandshakeProbePassing},
-		{name: "one failure does not fail over", advance: 30 * time.Second, probes: []probe{{"wg0", false}, {"wg18", true}}, mark: 51, state: "ready", reason: ReasonRecentHandshakeProbePassing},
-		{name: "a success resets the failure count", advance: 30 * time.Second, probes: []probe{{"wg0", true}, {"wg0", false}}, mark: 51, state: "ready", reason: ReasonRecentHandshakeProbePassing},
-		{name: "second consecutive failure fails over", advance: 30 * time.Second, probes: []probe{{"wg0", false}, {"wg18", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing},
-		{name: "both failing keeps a member with a session", probes: []probe{{"wg18", false}, {"wg18", false}}, mark: 51, state: "degraded", reason: ReasonProbeFailingFailOpen},
-		{name: "no handshake anywhere fails open to primary", wg0Age: time.Hour, mark: 51, state: "degraded", reason: ReasonNoRecentHandshakeFailOpen},
+		{name: "no probe result yet falls back to handshake", mark: 51, state: "ready", reason: ReasonRecentHandshake, order: []FwMark{51, 52018}},
+		{name: "first failure is believed without history", probes: []probe{{"wg0", false}, {"wg18", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing, order: []FwMark{52018}},
+		{name: "one success does not fail back", advance: 30 * time.Second, probes: []probe{{"wg0", true}, {"wg18", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing, order: []FwMark{52018}},
+		{name: "two successes do not fail back", advance: 30 * time.Second, probes: []probe{{"wg0", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing, order: []FwMark{52018}},
+		{name: "third consecutive success fails back", advance: 30 * time.Second, probes: []probe{{"wg0", true}, {"wg18", true}}, mark: 51, state: "ready", reason: ReasonRecentHandshakeProbePassing, order: []FwMark{51, 52018}},
+		{name: "one failure does not fail over", advance: 30 * time.Second, probes: []probe{{"wg0", false}, {"wg18", true}}, mark: 51, state: "ready", reason: ReasonRecentHandshakeProbePassing, order: []FwMark{51, 52018}},
+		{name: "a success resets the failure count", advance: 30 * time.Second, probes: []probe{{"wg0", true}, {"wg0", false}}, mark: 51, state: "ready", reason: ReasonRecentHandshakeProbePassing, order: []FwMark{51, 52018}},
+		{name: "second consecutive failure fails over", advance: 30 * time.Second, probes: []probe{{"wg0", false}, {"wg18", true}}, mark: 52018, state: "ready", reason: ReasonRecentHandshakeProbePassing, order: []FwMark{52018}},
+		{name: "both failing keeps a member with a session", probes: []probe{{"wg18", false}, {"wg18", false}}, mark: 51, state: "degraded", reason: ReasonProbeFailingFailOpen, order: []FwMark{51, 52018}},
+		{name: "no handshake anywhere fails open to primary", wg0Age: time.Hour, mark: 51, state: "degraded", reason: ReasonNoRecentHandshakeFailOpen, order: []FwMark{51, 52018}},
 	} {
 		t.Run(step.name, func(t *testing.T) {
 			now = now.Add(step.advance)
@@ -186,6 +188,9 @@ func TestGroupSelectionRequiresPassingProbe(t *testing.T) {
 			group := monitor.Snapshot().Groups[0]
 			if group.State != step.state || group.Reason != step.reason {
 				t.Fatalf("group = %s/%s, want %s/%s", group.State, group.Reason, step.state, step.reason)
+			}
+			if got := *monitor.Order("bypass").Load(); !slices.Equal(got, step.order) {
+				t.Fatalf("failover order = %v, want %v", got, step.order)
 			}
 		})
 	}

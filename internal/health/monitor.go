@@ -88,6 +88,10 @@ type Snapshot struct {
 type groupState struct {
 	group  Group
 	active atomic.Int32
+	// order is the chosen member followed by the other eligible members in
+	// preference order: where a connection goes next when the chosen member
+	// fails it. Replaced whole on every poll, never mutated.
+	order atomic.Pointer[[]FwMark]
 }
 
 // Monitor queries every unique device at most once per poll, even when a
@@ -129,6 +133,8 @@ func New(client DeviceClient, cfg Config, logger *slog.Logger) (*Monitor, error)
 		}
 		state := &groupState{group: group}
 		state.active.Store(int32(group.Members[0].Mark))
+		order := memberMarks(group.Members)
+		state.order.Store(&order)
 		m.groups = append(m.groups, state)
 		m.byName[group.Name] = state
 	}
@@ -152,6 +158,17 @@ func (m *Monitor) ObserveProbe(tunnel string, result ProbeResult) {
 		return
 	}
 	m.probes.record(TunnelName(tunnel), result.Success, result.At)
+}
+
+// Order returns the group's published failover order (see groupState.order).
+func (m *Monitor) Order(name string) *atomic.Pointer[[]FwMark] {
+	if m == nil {
+		return nil
+	}
+	if group := m.byName[name]; group != nil {
+		return &group.order
+	}
+	return nil
 }
 
 func (m *Monitor) Run(ctx context.Context) {
@@ -234,7 +251,8 @@ func (m *Monitor) Poll() {
 
 	groups := make([]GroupSnapshot, 0, len(m.groups))
 	for _, state := range m.groups {
-		chosen, groupState, reason := m.selectMember(state.group.Members, byTunnel, now)
+		chosen, groupState, reason, order := m.selectMember(state.group.Members, byTunnel, now)
+		state.order.Store(&order)
 		previous := FwMark(uint32(state.active.Swap(int32(chosen))))
 		if previous != chosen {
 			m.logger.Info("health.group_selection_changed", "component", "health", "group", state.group.Name, "fwmark", uint32(chosen), "outcome", groupState, "reason", reason)
@@ -255,12 +273,16 @@ func (m *Monitor) Poll() {
 }
 
 // selectMember picks the first member, in preference order, whose handshake is
-// recent and whose probe does not rule it out. When none qualifies it fails
-// open: first to a member that at least has a recent handshake, so a probe
-// endpoint that is itself down degrades to handshake-only selection rather than
-// to a member with no session at all, and finally to the primary.
-func (m *Monitor) selectMember(members []Member, byTunnel map[TunnelName]TunnelSnapshot, now time.Time) (FwMark, string, string) {
+// recent and whose probe does not rule it out, and returns the failover order
+// behind it. When none qualifies it fails open: first to a member that at least
+// has a recent handshake, so a probe endpoint that is itself down degrades to
+// handshake-only selection rather than to a member with no session at all, and
+// finally to the primary. A fail-open order lists every member, since nothing
+// is known to work better than anything else.
+func (m *Monitor) selectMember(members []Member, byTunnel map[TunnelName]TunnelSnapshot, now time.Time) (FwMark, string, string, []FwMark) {
 	firstRecent := -1
+	var eligible []FwMark
+	var verdict ProbeVerdict
 	for i, member := range members {
 		if byTunnel[member.Tunnel].Signal != SessionRecent {
 			continue
@@ -268,15 +290,40 @@ func (m *Monitor) selectMember(members []Member, byTunnel map[TunnelName]TunnelS
 		if firstRecent < 0 {
 			firstRecent = i
 		}
-		switch m.probes.verdict(member.Tunnel, now) {
-		case ProbePassing:
-			return member.Mark, "ready", ReasonRecentHandshakeProbePassing
-		case ProbeUnknown:
-			return member.Mark, "ready", ReasonRecentHandshake
+		if v := m.probes.verdict(member.Tunnel, now); v.Eligible() {
+			if len(eligible) == 0 {
+				verdict = v
+			}
+			eligible = append(eligible, member.Mark)
 		}
 	}
-	if firstRecent >= 0 {
-		return members[firstRecent].Mark, "degraded", ReasonProbeFailingFailOpen
+	switch {
+	case len(eligible) > 0 && verdict == ProbePassing:
+		return eligible[0], "ready", ReasonRecentHandshakeProbePassing, eligible
+	case len(eligible) > 0:
+		return eligible[0], "ready", ReasonRecentHandshake, eligible
+	case firstRecent >= 0:
+		return members[firstRecent].Mark, "degraded", ReasonProbeFailingFailOpen, chosenFirst(members, firstRecent)
+	default:
+		return members[0].Mark, "degraded", ReasonNoRecentHandshakeFailOpen, memberMarks(members)
 	}
-	return members[0].Mark, "degraded", ReasonNoRecentHandshakeFailOpen
+}
+
+func memberMarks(members []Member) []FwMark {
+	marks := make([]FwMark, len(members))
+	for i, member := range members {
+		marks[i] = member.Mark
+	}
+	return marks
+}
+
+func chosenFirst(members []Member, chosen int) []FwMark {
+	marks := make([]FwMark, 0, len(members))
+	marks = append(marks, members[chosen].Mark)
+	for i, member := range members {
+		if i != chosen {
+			marks = append(marks, member.Mark)
+		}
+	}
+	return marks
 }

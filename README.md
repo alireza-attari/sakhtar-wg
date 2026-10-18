@@ -139,7 +139,8 @@ sakhtar-wg version [-json]       print build metadata
 ## Scope
 
 Gateway routing and pfSense synchronization are currently IPv4-only. Proxy
-destinations may resolve to IPv4 or IPv6. L3 failover between tunnels and the
+destinations may resolve to IPv4 or IPv6; through a tunnel only IPv4 is dialed,
+since the tunnels route IPv4 only. L3 failover between tunnels and the
 external DNS-rewrite control plane are outside this repository.
 
 ## Contributing and security

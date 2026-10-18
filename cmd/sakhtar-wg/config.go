@@ -133,8 +133,8 @@ type PfSync struct {
 // Group is a failover set of tunnels sharing one logical egress name. A proxy
 // rule (or proxy.default) can route to the group name; the health monitor keeps
 // it pointed at the first member whose handshake is fresh and whose active probe
-// (when enabled) passes, so a dead upstream fails over without a reload or any
-// per-connection cost.
+// (when enabled) passes, so a dead upstream fails over without a reload. A
+// connection that fails on one eligible member retries the next.
 type Group struct {
 	Name         string   `yaml:"name"`          // referenced by proxy.rules[].via / proxy.default
 	Members      []string `yaml:"members"`       // tunnel names, in preference order (primary first)

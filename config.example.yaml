@@ -102,9 +102,11 @@ tunnels:
       keepalive: 25
 
 # Groups pool tunnels behind one name for automatic failover. A rule that routes
-# to `bypass` uses wg0 while its handshake is fresh, and fails over to wg1 within
-# one health_interval if wg0 goes stale — no reload, no per-connection cost.
-# Members are tried in order (primary first).
+# to `bypass` uses wg0 while its handshake is fresh (and, with health_probe on,
+# its probe passes), and fails over to wg1 within one health_interval if wg0
+# stops qualifying — no reload. Members are preferred in order (primary first);
+# a connection whose dial or DNS answer fails on one eligible member retries the
+# next one within the same proxy.dial_timeout.
 groups:
   - name: bypass
     members: [wg0, wg1]

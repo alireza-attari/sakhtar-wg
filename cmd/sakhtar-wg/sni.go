@@ -18,6 +18,7 @@ import (
 	"time"
 
 	resolvercache "github.com/alireza-attari/sakhtar-wg/internal/dns"
+	internalhealth "github.com/alireza-attari/sakhtar-wg/internal/health"
 	"github.com/alireza-attari/sakhtar-wg/internal/observability"
 	proxydial "github.com/alireza-attari/sakhtar-wg/internal/proxy"
 	internalrouting "github.com/alireza-attari/sakhtar-wg/internal/routing"
@@ -79,6 +80,7 @@ type router struct {
 type markRef struct {
 	static int
 	dyn    *atomic.Int32
+	order  *atomic.Pointer[[]internalhealth.FwMark]
 }
 
 func (m markRef) mark() int {
@@ -88,10 +90,25 @@ func (m markRef) mark() int {
 	return m.static
 }
 
+// marks is the egress order a connection tries: a group's published failover
+// order, or the single static mark.
+func (m markRef) marks() []int {
+	if m.order != nil {
+		if order := m.order.Load(); order != nil && len(*order) > 0 {
+			marks := make([]int, len(*order))
+			for i, mark := range *order {
+				marks[i] = int(mark)
+			}
+			return marks
+		}
+	}
+	return []int{m.mark()}
+}
+
 func markRefFor(c *Config, hm *HealthMonitor, via string) markRef {
 	if hm != nil {
 		if a := hm.Active(via); a != nil {
-			return markRef{dyn: a}
+			return markRef{dyn: a, order: hm.Order(via)}
 		}
 	}
 	return markRef{static: c.markFor(via)}
@@ -159,13 +176,17 @@ func newRouterGeneration(c *Config, hm *HealthMonitor, generation uint64, dial f
 }
 
 func (rt *router) mark(host string) int {
+	return rt.route(host).mark()
+}
+
+func (rt *router) route(host string) markRef {
 	if normalized, _, err := canonicalHost(host, false); err == nil {
 		host = normalized
 	}
 	if ref, ok := rt.suffixes.Lookup(host); ok {
-		return ref.mark()
+		return ref
 	}
-	return rt.def.mark()
+	return rt.def
 }
 
 type proxyProtocol string
@@ -462,7 +483,8 @@ func peekHTTPHostLimit(r io.Reader, limit int64) (string, []byte, error) {
 }
 
 func (s *Server) pipe(ctx context.Context, session *ownedSession, client net.Conn, prefix []byte, host string, isIP bool, port string, rt *router, labels rejectionKey) {
-	mark := rt.mark(host)
+	marks := rt.route(host).marks()
+	mark := marks[0]
 	self := s.self.Load()
 	selfValues := map[netip.Addr]struct{}{}
 	if self != nil {
@@ -474,7 +496,7 @@ func (s *Server) pipe(ctx context.Context, session *ownedSession, client net.Con
 		return
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, rt.dialTimeout)
-	backend, err := s.dialBackend(dialCtx, host, isIP, port, mark, rt, selfValues)
+	backend, err := s.dialEgresses(dialCtx, host, isIP, port, marks, rt, selfValues)
 	cancel()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -491,6 +513,46 @@ func (s *Server) pipe(ctx context.Context, session *ownedSession, client net.Con
 	session.setBackend(backend)
 	result := runConnectionSession(ctx, client, backend, prefix, rt.idleTimeout)
 	s.recordSession(result)
+}
+
+// dialEgresses dials through each egress in turn until one connects. A dial
+// error or a denied answer on one group member says nothing about the next: a
+// dead tunnel, or a tunnel whose resolver is poisoned, leaves the others able
+// to reach the host. Each egress gets a slice of what is left of ctx's budget,
+// re-resolving through its own resolver.
+//
+// The result is a destination denial only when every egress denied it; any
+// real dial failure makes the whole attempt a dial error.
+func (s *Server) dialEgresses(ctx context.Context, host string, isIP bool, port string, marks []int, rt *router, self map[netip.Addr]struct{}) (net.Conn, error) {
+	var denied, failed []error
+	for i, mark := range marks {
+		if err := ctx.Err(); err != nil {
+			failed = append(failed, err)
+			break
+		}
+		egressCtx, cancel := ctx, context.CancelFunc(func() {})
+		if deadline, ok := ctx.Deadline(); ok {
+			egressCtx, cancel = context.WithTimeout(ctx, proxydial.BudgetSlice(time.Until(deadline), len(marks)-i))
+		}
+		conn, err := s.dialBackend(egressCtx, host, isIP, port, mark, rt, self)
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		err = fmt.Errorf("egress %s: %w", rt.egressName(mark), err)
+		if errors.Is(err, errDestinationDenied) {
+			denied = append(denied, err)
+		} else {
+			failed = append(failed, err)
+		}
+	}
+	if len(failed) > 0 {
+		return nil, errors.Join(failed...)
+	}
+	if len(denied) > 0 {
+		return nil, errors.Join(denied...)
+	}
+	return nil, errors.New("proxy: no egress to dial")
 }
 
 func (s *Server) dialBackend(ctx context.Context, host string, isIP bool, port string, mark int, rt *router, self map[netip.Addr]struct{}) (net.Conn, error) {
