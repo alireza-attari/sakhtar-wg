@@ -272,7 +272,10 @@ func (u *RouteUpdater) send(ctx context.Context, cfg *Config) {
 
 // fetchSource fetches and parses one source, egressing per src.Via.
 func (u *RouteUpdater) fetchSource(ctx context.Context, base *Config, src RouteSource) ([]string, error) {
+	// Each fetch builds its own transport; closing its idle connection keeps one
+	// open socket per source from piling up on every refresh cycle.
 	client := u.httpClient(base, src.Via)
+	defer client.CloseIdleConnections()
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)

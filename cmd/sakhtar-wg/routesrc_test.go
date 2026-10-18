@@ -3,10 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestParseCIDRLines(t *testing.T) {
@@ -165,5 +169,46 @@ func TestRouteRefreshAppliesTheCurrentBase(t *testing.T) {
 				t.Fatalf("applied tunnels = %+v, want only %s", got.Tunnels, tc.want)
 			}
 		})
+	}
+}
+
+// fetchSource builds a transport per fetch; its idle connection must not
+// outlive the fetch, or every refresh cycle leaves one socket per source open.
+func TestFetchSourceLeavesNoIdleConnection(t *testing.T) {
+	var mu sync.Mutex
+	open := 0
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("192.0.2.0/24\n"))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch state {
+		case http.StateNew:
+			open++
+		case http.StateClosed, http.StateHijacked:
+			open--
+		}
+	}
+	server.Start()
+	defer server.Close()
+	u := &RouteUpdater{}
+	for range 3 {
+		if _, err := u.fetchSource(context.Background(), &Config{}, RouteSource{Name: "test", URL: server.URL, Format: "cidr-lines", Via: "direct"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		current := open
+		mu.Unlock()
+		if current == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d connections still open after the fetches returned", current)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
