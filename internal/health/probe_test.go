@@ -19,7 +19,9 @@ func TestProbeBounds(t *testing.T) {
 		prober.Try(context.Background())
 	}
 	deadline := time.Now().Add(time.Second)
-	for prober.InFlight() < 2 && time.Now().Before(deadline) {
+	// InFlight rises before the probe goroutine reaches the probe func, so
+	// wait for both counters or a slow scheduler reads calls=1.
+	for (prober.InFlight() < 2 || calls.Load() < 2) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	if prober.InFlight() != 2 || calls.Load() != 2 {
