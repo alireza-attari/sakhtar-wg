@@ -171,6 +171,23 @@ func (m *Monitor) Order(name string) *atomic.Pointer[[]FwMark] {
 	return nil
 }
 
+// InheritProbes carries prev's probe history for tunnels into m, so a reload
+// does not reset hysteresis: without it a tunnel known to fail its probe while
+// keeping a fresh handshake became eligible again until its next result, and a
+// flapping one got back in on a single lucky probe. Pass only tunnels whose
+// configuration did not change; a reconfigured tunnel deserves a fresh verdict.
+// Call it before Run.
+func (m *Monitor) InheritProbes(prev *Monitor, tunnels []string) {
+	if m == nil || prev == nil || m.probes == nil || prev.probes == nil {
+		return
+	}
+	names := make([]TunnelName, len(tunnels))
+	for i, tunnel := range tunnels {
+		names[i] = TunnelName(tunnel)
+	}
+	m.probes.restore(prev.probes.snapshot(names))
+}
+
 func (m *Monitor) Run(ctx context.Context) {
 	if m == nil {
 		return

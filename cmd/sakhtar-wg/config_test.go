@@ -299,3 +299,15 @@ func TestSameTunnelSpecIgnoresResolver(t *testing.T) {
 		})
 	}
 }
+
+func TestUnchangedTunnels(t *testing.T) {
+	old := &Config{Tunnels: []Tunnel{{Name: "wg0", Fwmark: 51}, {Name: "wg18", Fwmark: 52018}, {Name: "wgtr", Fwmark: 52090}}}
+	next := &Config{Tunnels: []Tunnel{
+		{Name: "wg0", Fwmark: 51, Resolver: ResolverList{"208.67.222.222:5353"}},
+		{Name: "wg18", Fwmark: 52019},
+		{Name: "wgsh", Fwmark: 52100},
+	}}
+	if got, want := unchangedTunnels(old, next), []string{"wg0"}; !slices.Equal(got, want) {
+		t.Fatalf("unchangedTunnels = %v, want %v", got, want)
+	}
+}

@@ -243,3 +243,33 @@ func TestProbePolicyValidation(t *testing.T) {
 		})
 	}
 }
+
+// A reload builds a new monitor. Without inherited history a tunnel known to
+// fail its probe while keeping a fresh handshake was eligible again until its
+// next probe result arrived.
+func TestReloadKeepsProbeHistoryOfUnchangedTunnels(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	for _, tc := range []struct {
+		name    string
+		inherit []string
+		mark    int32
+	}{
+		{"unchanged tunnel keeps its failing verdict", []string{"wg0", "wg18"}, 52018},
+		{"reconfigured tunnel starts fresh", []string{"wg18"}, 51},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wg0 := &wgtypes.Device{Peers: []wgtypes.Peer{{LastHandshakeTime: now}}}
+			wg18 := &wgtypes.Device{Peers: []wgtypes.Peer{{LastHandshakeTime: now}}}
+			previous := newProbeAwareMonitor(t, &now, wg0, wg18)
+			previous.ObserveProbe("wg0", ProbeResult{At: now, Success: false})
+			previous.ObserveProbe("wg18", ProbeResult{At: now, Success: true})
+
+			next := newProbeAwareMonitor(t, &now, wg0, wg18)
+			next.InheritProbes(previous, tc.inherit)
+			next.Poll()
+			if got := next.Active("bypass").Load(); got != tc.mark {
+				t.Fatalf("active mark = %d, want %d", got, tc.mark)
+			}
+		})
+	}
+}

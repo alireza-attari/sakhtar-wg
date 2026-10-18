@@ -268,6 +268,7 @@ loop:
 					log.Printf("reload: %v (keeping current config)", err)
 					continue
 				}
+				candidateHM.InheritProbes(hm, unchangedTunnels(cfg, next))
 				hmCancel()
 				<-hmDone
 				_ = hm.Close()

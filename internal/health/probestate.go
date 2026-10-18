@@ -91,6 +91,29 @@ func (t *probeTracker) record(tunnel TunnelName, success bool, at time.Time) {
 	}
 }
 
+func (t *probeTracker) snapshot(tunnels []TunnelName) map[TunnelName]probeState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	states := make(map[TunnelName]probeState, len(tunnels))
+	for _, tunnel := range tunnels {
+		if state, seen := t.byTunnel[tunnel]; seen {
+			states[tunnel] = *state
+		}
+	}
+	return states
+}
+
+func (t *probeTracker) restore(states map[TunnelName]probeState) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for tunnel, state := range states {
+		if _, seen := t.byTunnel[tunnel]; !seen {
+			copied := state
+			t.byTunnel[tunnel] = &copied
+		}
+	}
+}
+
 func (t *probeTracker) verdict(tunnel TunnelName, now time.Time) ProbeVerdict {
 	if t == nil {
 		return ProbeUnknown

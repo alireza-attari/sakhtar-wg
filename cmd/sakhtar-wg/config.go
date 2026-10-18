@@ -920,6 +920,22 @@ func sameTunnelSpec(a, b Tunnel) bool {
 	return reflect.DeepEqual(a, b)
 }
 
+// unchangedTunnels names the tunnels present in both configs with the same
+// spec: the ones whose health history still describes the same exit.
+func unchangedTunnels(old, next *Config) []string {
+	previous := make(map[string]Tunnel, len(old.Tunnels))
+	for _, tunnel := range old.Tunnels {
+		previous[tunnel.Name] = tunnel
+	}
+	var names []string
+	for _, tunnel := range next.Tunnels {
+		if prev, ok := previous[tunnel.Name]; ok && sameTunnelSpec(prev, tunnel) {
+			names = append(names, tunnel.Name)
+		}
+	}
+	return names
+}
+
 // resolversFor is the resolver list for lookups through mark: the tunnel's own
 // override, else proxy.resolver.
 func (c *Config) resolversFor(mark int) ResolverList {
