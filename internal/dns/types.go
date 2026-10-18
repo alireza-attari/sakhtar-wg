@@ -118,7 +118,7 @@ const (
 type Policy struct {
 	PositiveCapacity    int
 	NegativeCapacity    int
-	MaxPending          int
+	MaxPending          int // per egress
 	MinPositiveTTL      time.Duration
 	MaxPositiveTTL      time.Duration
 	NegativeTTL         time.Duration

@@ -56,7 +56,11 @@ type Cache struct {
 	shards   []cacheShard
 	flightMu sync.Mutex
 	flights  map[key]*flight
-	metrics  metrics
+	// pendingByEgress enforces MaxPending per egress. One global cap let a
+	// tunnel whose resolver blackholes fill every slot with 5s flights, so
+	// uncached names then failed on every egress, direct included.
+	pendingByEgress map[string]int
+	metrics         metrics
 }
 
 func NewCache(policy Policy, clock Clock) (*Cache, error) {
@@ -68,10 +72,11 @@ func NewCache(policy Policy, clock Clock) (*Cache, error) {
 	}
 	shardCount := min(defaultShardCount, policy.PositiveCapacity, policy.NegativeCapacity)
 	c := &Cache{
-		policy:  policy,
-		clock:   clock,
-		shards:  make([]cacheShard, shardCount),
-		flights: make(map[key]*flight),
+		policy:          policy,
+		clock:           clock,
+		shards:          make([]cacheShard, shardCount),
+		flights:         make(map[key]*flight),
+		pendingByEgress: make(map[string]int),
 	}
 	for i := range c.shards {
 		c.shards[i] = cacheShard{
@@ -211,7 +216,7 @@ func (c *Cache) startFlight(k key, query Query, resolver Resolver, stale Result,
 		c.flightMu.Unlock()
 		return f, nil
 	}
-	if len(c.flights) >= c.policy.MaxPending {
+	if c.pendingByEgress[k.egress] >= c.policy.MaxPending {
 		c.metrics.rejected.Add(1)
 		c.metrics.requests[requestRejected].Add(1)
 		c.flightMu.Unlock()
@@ -219,6 +224,7 @@ func (c *Cache) startFlight(k key, query Query, resolver Resolver, stale Result,
 	}
 	f := &flight{done: make(chan struct{}), stale: stale.clone(), serveStale: serveStale}
 	c.flights[k] = f
+	c.pendingByEgress[k.egress]++
 	c.metrics.pending.Add(1)
 	c.flightMu.Unlock()
 
@@ -262,6 +268,9 @@ func (c *Cache) runFlight(k key, query Query, resolver Resolver, stale Result, s
 	}
 	c.flightMu.Lock()
 	delete(c.flights, k)
+	if c.pendingByEgress[k.egress]--; c.pendingByEgress[k.egress] <= 0 {
+		delete(c.pendingByEgress, k.egress)
+	}
 	c.metrics.pending.Add(-1)
 	close(f.done)
 	c.flightMu.Unlock()

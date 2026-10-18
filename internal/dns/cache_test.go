@@ -427,3 +427,54 @@ func TestResolutionMetricsAreAttributedPerEgress(t *testing.T) {
 		t.Fatalf("the healthy egress absorbed the other tunnel's failure: %v", stats)
 	}
 }
+
+// On 2026-10-18 wg18's resolver path dropped most UDP. Its lookups each held a
+// pending slot for the full resolver timeout, and with one shared cap that
+// starved every other egress of DNS for uncached names.
+func TestPendingLimitIsPerEgress(t *testing.T) {
+	policy := testPolicy()
+	policy.MaxPending = 1
+	cache := newTestCache(t, policy, realClock{})
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	blackholed := ResolverFunc(func(context.Context, Query) (Result, error) {
+		started <- struct{}{}
+		<-release
+		return Result{}, errors.New("i/o timeout")
+	})
+	answering := ResolverFunc(func(context.Context, Query) (Result, error) {
+		return Result{Addrs: []netip.Addr{netip.MustParseAddr("203.0.113.1")}, ExpiresAt: time.Now().Add(time.Minute), RCode: RCodeSuccess}, nil
+	})
+	on := func(egress, host string) Query {
+		q := query(host)
+		q.Egress = egress
+		return q
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = cache.Resolve(context.Background(), on("wg18", "stuck.example"), blackholed)
+	}()
+	<-started
+	for _, tc := range []struct {
+		name    string
+		egress  string
+		limited bool
+	}{
+		{"the stuck egress is at its cap", "wg18", true},
+		{"another tunnel still resolves", "wg0", false},
+		{"direct still resolves", "direct", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := cache.Resolve(context.Background(), on(tc.egress, "fresh-"+tc.egress+".example"), answering)
+			if limited := errors.Is(err, ErrPendingLimit); limited != tc.limited {
+				t.Fatalf("err = %v; pending limited = %t, want %t", err, limited, tc.limited)
+			}
+		})
+	}
+	close(release)
+	<-done
+	if _, err := cache.Resolve(context.Background(), on("wg18", "after.example"), answering); err != nil {
+		t.Fatalf("slot not released after the flight ended: %v", err)
+	}
+}

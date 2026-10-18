@@ -143,7 +143,7 @@ proxy:
   # beyond these limits.
   dns_positive_capacity: 4096
   dns_negative_capacity: 1024
-  dns_max_pending: 128
+  dns_max_pending: 128   # concurrent uncached lookups per egress
   dns_min_positive_ttl: 5
   dns_max_positive_ttl: 300
   dns_negative_ttl: 20
