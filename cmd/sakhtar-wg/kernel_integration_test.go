@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alireza-attari/sakhtar-wg/internal/firewall"
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
 )
@@ -237,10 +238,15 @@ func TestKernelNamespaceHelper(t *testing.T) {
 
 	cfg := &Config{Tunnels: []Tunnel{tun}, Gateway: Gateway{Enabled: true, ClientCIDRs: []string{"10.0.1.0/24"}}}
 	for i := range 2 {
+		if err := egressGuardUp(cfg); err != nil {
+			t.Fatalf("egressGuardUp #%d: %v", i+1, err)
+		}
 		if err := gatewayUp(cfg); err != nil {
 			t.Fatalf("gatewayUp #%d: %v", i+1, err)
 		}
 	}
+	assertIPTablesRuleCount(t, "filter", "OUTPUT", "-j SAKHTAR_WG_OUTPUT", 1)
+	assertIPTablesRuleCount(t, "filter", "SAKHTAR_WG_OUTPUT", "! -o wgit0 -m mark --mark 0x3039 ", 1)
 	assertIPTablesRuleCount(t, "nat", "POSTROUTING", "-j SAKHTAR_WG_POSTROUTING", 1)
 	assertIPTablesRuleCount(t, "nat", "SAKHTAR_WG_POSTROUTING", "-s 10.0.1.0/24 -d 203.0.113.0/24 -o wgit0", 1)
 	assertIPTablesRuleCount(t, "mangle", "SAKHTAR_WG_FORWARD", "-s 10.0.1.0/24 -d 203.0.113.0/24 -o wgit0", 1)
@@ -267,8 +273,12 @@ func TestKernelNamespaceHelper(t *testing.T) {
 	}
 	assertIPTablesRuleCount(t, "nat", "POSTROUTING", "-j SAKHTAR_WG_POSTROUTING", 0)
 	assertIPTablesRuleCount(t, "filter", "FORWARD", "-j SAKHTAR_WG_FORWARD", 0)
-	if err := tunnelDown(tun); err != nil {
+	if err := teardown(cfg); err != nil {
 		t.Fatal(err)
+	}
+	assertIPTablesRuleCount(t, "filter", "OUTPUT", "-j SAKHTAR_WG_OUTPUT", 0)
+	if _, exists, err := listChain("filter", firewall.OutputChain); err != nil || exists {
+		t.Fatalf("egress guard chain survived teardown: exists=%v, %v", exists, err)
 	}
 	if _, err := netlink.LinkByName(tun.Name); err == nil {
 		t.Fatal("WireGuard link survived cleanup")
@@ -365,8 +375,13 @@ func TestGatewayPolicyNamespaceHelper(t *testing.T) {
 		return
 	}
 	cfg := &Config{
-		Tunnels: []Tunnel{{Name: "dutegress0", Routes: []string{"198.18.0.0/24"}}},
+		Tunnels: []Tunnel{{Name: "dutegress0", Fwmark: 4242, FwmarkMask: ^uint32(0), Routes: []string{"198.18.0.0/24"}}},
 		Gateway: Gateway{Enabled: true, ClientCIDRs: []string{"10.0.1.0/24"}},
+	}
+	// The guard is installed too, to prove it leaves the forwarded and NATed
+	// gateway path alone.
+	if err := egressGuardUp(cfg); err != nil {
+		t.Fatal(err)
 	}
 	if err := gatewayUp(cfg); err != nil {
 		t.Fatal(err)

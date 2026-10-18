@@ -7,6 +7,12 @@ versions follow Semantic Versioning.
 
 ### Fixed
 
+- Marked egress now fails closed. An owned `filter/SAKHTAR_WG_OUTPUT` chain
+  rejects a tunnel-marked packet routed anywhere but its own tunnel, so a
+  missing policy rule, tunnel-table route, or link refuses the connection
+  instead of sending the proxy, its DNS, and the probes out the WAN until the
+  watchdog repairs it. The guard is part of `plan`, drift, and the watchdog
+  repair.
 - Policy rules, routes, links, and gateway firewall rules removed by something
   outside the daemon (for example a systemd-networkd restart) are now detected
   and reapplied within 30 seconds, instead of staying missing until the next

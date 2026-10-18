@@ -110,6 +110,14 @@ func runUp(path string) {
 			log.Fatalf("gateway policy preflight: %v", err)
 		}
 	}
+	if err := egressGuardUp(cfg); err != nil {
+		if cleanupErr := teardown(cfg); cleanupErr != nil {
+			log.Printf("cleanup after failed egress guard: %v", cleanupErr)
+			err = errors.Join(err, cleanupErr)
+		}
+		measureAndRecordDrift(wg, cfg, err)
+		log.Fatalf("egress guard: %v", err)
+	}
 	for _, t := range cfg.Tunnels {
 		if err := tunnelUp(wg, t); err != nil {
 			if cleanupErr := teardown(cfg); cleanupErr != nil {
@@ -351,6 +359,9 @@ func applyReload(wg *wgctrl.Client, old, next *Config, srv *Server, hm *HealthMo
 			return fmt.Errorf("candidate gateway policy: %w", err)
 		}
 	}
+	if _, err := compileEgressGuardRuleset(next); err != nil {
+		return fmt.Errorf("candidate egress guard: %w", err)
+	}
 	oldByName := make(map[string]Tunnel, len(old.Tunnels))
 	for _, t := range old.Tunnels {
 		oldByName[t.Name] = t
@@ -408,6 +419,11 @@ func applyReload(wg *wgctrl.Client, old, next *Config, srv *Server, hm *HealthMo
 			}
 		}
 		log.Printf("tunnel %s reconfigured", t.Name)
+	}
+	// Before srv.Reload: a new tunnel's mark must not be stamped on a socket
+	// until its guard exists.
+	if err := egressGuardUp(next); err != nil {
+		return rollbackKernelApply(wg, old, next, err)
 	}
 	if old.Gateway.Enabled && !next.Gateway.Enabled {
 		if err := gatewayDown(old); err != nil {
@@ -471,6 +487,9 @@ func rollbackKernelApply(wg *wgctrl.Client, old, attempted *Config, applyErr err
 	} else if err := gatewayDown(attempted); err != nil {
 		repair = append(repair, fmt.Errorf("remove uncommitted gateway: %w", err))
 	}
+	if err := egressGuardUp(old); err != nil {
+		repair = append(repair, fmt.Errorf("repair egress guard: %w", err))
+	}
 	return errors.Join(applyErr, errors.Join(repair...))
 }
 
@@ -496,6 +515,10 @@ func teardown(cfg *Config) error {
 		if err := tunnelDown(t); err != nil {
 			cleanup = append(cleanup, err)
 		}
+	}
+	// Last, so no tunnel mark is ever routed unguarded while tunnels go down.
+	if err := egressGuardDown(cfg); err != nil {
+		cleanup = append(cleanup, err)
 	}
 	return errors.Join(cleanup...)
 }

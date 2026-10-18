@@ -36,6 +36,45 @@ func gatewayUp(cfg *Config) error {
 	if err := writeSysctl("net/ipv4/ip_forward", "1"); err != nil {
 		return fmt.Errorf("enable ip_forward: %w", err)
 	}
+	return installOwnedChains(ruleset, inspections)
+}
+
+// egressGuardUp installs the fail-closed mark guard (see
+// firewall.CompileEgressGuard). It runs before any tunnel comes up, so a
+// marked socket is never routed without it.
+func egressGuardUp(cfg *Config) error {
+	ruleset, err := compileEgressGuardRuleset(cfg)
+	if err != nil {
+		return err
+	}
+	inspections, err := inspectFirewallOwnership(ruleset)
+	if err != nil {
+		return fmt.Errorf("egress guard: %w", err)
+	}
+	if err := installOwnedChains(ruleset, inspections); err != nil {
+		return fmt.Errorf("egress guard: %w", err)
+	}
+	return nil
+}
+
+func egressGuardDown(cfg *Config) error {
+	ruleset, err := compileEgressGuardRuleset(cfg)
+	if err != nil {
+		return err
+	}
+	inspections, err := inspectFirewallOwnership(ruleset)
+	if err != nil {
+		return fmt.Errorf("egress guard: %w", err)
+	}
+	if err := removeOwnedChains(inspections); err != nil {
+		return fmt.Errorf("egress guard: %w", err)
+	}
+	return nil
+}
+
+// installOwnedChains atomically replaces the owned chain bodies, then leaves
+// exactly one owned jump at the top of each hook.
+func installOwnedChains(ruleset firewall.Ruleset, inspections []chainInspection) error {
 	if err := runRestore(ruleset.RestoreInput()); err != nil {
 		return fmt.Errorf("replace owned firewall ruleset: %w", err)
 	}
@@ -181,6 +220,12 @@ func gatewayDown(cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	return removeOwnedChains(inspections)
+}
+
+// removeOwnedChains deletes the owned jumps first, so no hook ever points at a
+// chain that is being flushed, then the chains themselves.
+func removeOwnedChains(inspections []chainInspection) error {
 	var cleanup []error
 	for _, inspection := range inspections {
 		for i := 0; i < inspection.OwnedJumps; i++ {

@@ -82,3 +82,55 @@ func TestOwnershipRejectsForeignChainContent(t *testing.T) {
 		t.Fatal("owned rule not recognized")
 	}
 }
+
+func TestEgressGuardRejectsMarkedTrafficOffItsTunnel(t *testing.T) {
+	guards := []MarkGuard{
+		{Interface: "wg18", Mark: 18, Mask: ^uint32(0)},
+		{Interface: "wg0", Mark: 0x200, Mask: 0xff00},
+	}
+	first, err := CompileEgressGuard(guards)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := CompileEgressGuard([]MarkGuard{guards[1], guards[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(first.Rules, "\n") != strings.Join(second.Rules, "\n") {
+		t.Fatal("guard rules depend on config order")
+	}
+	if first.Table != "filter" || first.Hook != "OUTPUT" || first.Name != OutputChain {
+		t.Fatalf("guard chain = %s/%s hooked at %s", first.Table, first.Name, first.Hook)
+	}
+	owner := "-m comment --comment " + OwnerComment
+	want := []string{
+		"-o lo " + owner + " -j RETURN",
+		"! -o wg0 -m mark --mark 0x200/0xff00 " + owner + " -j REJECT --reject-with icmp-port-unreachable",
+		"! -o wg18 -m mark --mark 0x12 " + owner + " -j REJECT --reject-with icmp-port-unreachable",
+	}
+	if strings.Join(first.Rules, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("guard rules =\n%s\nwant\n%s", strings.Join(first.Rules, "\n"), strings.Join(want, "\n"))
+	}
+	for _, rule := range first.Rules {
+		if !RuleIsOwned(rule) {
+			t.Fatalf("guard rule %q lacks ownership proof", rule)
+		}
+	}
+}
+
+func TestEgressGuardRefusesUnsafeInput(t *testing.T) {
+	for name, guards := range map[string][]MarkGuard{
+		"bad interface":  {{Interface: "wg 0", Mark: 1, Mask: ^uint32(0)}},
+		"duplicate":      {{Interface: "wg0", Mark: 1, Mask: ^uint32(0)}, {Interface: "wg0", Mark: 2, Mask: ^uint32(0)}},
+		"zero mark":      {{Interface: "wg0", Mark: 0, Mask: ^uint32(0)}},
+		"mark past mask": {{Interface: "wg0", Mark: 0x101, Mask: 0xff00}},
+	} {
+		if _, err := CompileEgressGuard(guards); err == nil {
+			t.Errorf("%s: guard compiled", name)
+		}
+	}
+	empty, err := CompileEgressGuard(nil)
+	if err != nil || len(empty.Rules) != 0 {
+		t.Fatalf("no tunnels = %v, %v; want an empty chain", empty.Rules, err)
+	}
+}

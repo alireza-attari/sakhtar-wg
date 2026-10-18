@@ -338,6 +338,11 @@ func applyRoutes(cfg *Config) {
 			kernelDrift++
 		}
 	}
+	if err := egressGuardUp(cfg); err != nil {
+		log.Printf("routes: %v", err)
+		applyErrors = append(applyErrors, err)
+		firewallDrift++
+	}
 	if err := gatewayUp(cfg); err != nil {
 		log.Printf("routes: gateway: %v", err)
 		applyErrors = append(applyErrors, err)

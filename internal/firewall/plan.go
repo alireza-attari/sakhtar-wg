@@ -15,6 +15,7 @@ const (
 	FilterChain = "SAKHTAR_WG_FORWARD"
 	NATChain    = "SAKHTAR_WG_POSTROUTING"
 	MangleChain = "SAKHTAR_WG_FORWARD"
+	OutputChain = "SAKHTAR_WG_OUTPUT"
 )
 
 type TunnelPolicy struct {
@@ -60,8 +61,8 @@ func Compile(policy Policy) (Ruleset, error) {
 	var destinationOwners []destinationOwner
 	var destinationDrops []string
 	for _, tunnel := range tunnels {
-		if tunnel.Interface == "" || strings.ContainsAny(tunnel.Interface, " \t\r\n\"'") {
-			return Ruleset{}, fmt.Errorf("invalid interface name %q", tunnel.Interface)
+		if err := validInterface(tunnel.Interface); err != nil {
+			return Ruleset{}, err
 		}
 		if _, duplicate := seenInterface[tunnel.Interface]; duplicate {
 			return Ruleset{}, fmt.Errorf("duplicate tunnel interface %q", tunnel.Interface)
@@ -112,6 +113,66 @@ func Compile(policy Policy) (Ruleset, error) {
 	sort.Strings(destinationDrops)
 	filter.Rules = append(filter.Rules, destinationDrops...)
 	return Ruleset{Chains: []Chain{filter, nat, mangle}}, nil
+}
+
+func validInterface(name string) error {
+	if name == "" || strings.ContainsAny(name, " \t\r\n\"'") {
+		return fmt.Errorf("invalid interface name %q", name)
+	}
+	return nil
+}
+
+// MarkGuard is one tunnel's routing selector: sockets carrying Mark under Mask
+// must leave through Interface and nowhere else.
+type MarkGuard struct {
+	Interface string
+	Mark      uint32
+	Mask      uint32
+}
+
+// CompileEgressGuard makes marked egress fail closed. A tunnel mark only
+// reaches its tunnel through an `ip rule` and a route in the tunnel's table;
+// when either is gone (systemd-networkd flushes foreign rules) the lookup
+// falls through to the main table and the packet leaves the WAN. The rules
+// match on the output interface the kernel already chose, so they are inert
+// while routing is intact and reject only a marked packet routed anywhere but
+// its own tunnel. REJECT rather than DROP so the dial fails at once and the
+// probe and per-connection failover move to the next member.
+//
+// Loopback returns first: the local table answers before any policy rule, so
+// a marked socket to a local address is not a leak.
+func CompileEgressGuard(guards []MarkGuard) (Chain, error) {
+	owner := "-m comment --comment " + OwnerComment
+	chain := Chain{Table: "filter", Hook: "OUTPUT", Name: OutputChain, Comment: OwnerComment + ":filter-output"}
+	if len(guards) == 0 {
+		return chain, nil
+	}
+	sorted := append([]MarkGuard(nil), guards...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Interface < sorted[j].Interface })
+	chain.Rules = append(chain.Rules, fmt.Sprintf("-o lo %s -j RETURN", owner))
+	for i, guard := range sorted {
+		if err := validInterface(guard.Interface); err != nil {
+			return Chain{}, err
+		}
+		if i > 0 && sorted[i-1].Interface == guard.Interface {
+			return Chain{}, fmt.Errorf("duplicate tunnel interface %q", guard.Interface)
+		}
+		if guard.Mark == 0 || guard.Mask == 0 || guard.Mark&guard.Mask != guard.Mark {
+			return Chain{}, fmt.Errorf("tunnel %s: mark %#x/%#x cannot select its own traffic", guard.Interface, guard.Mark, guard.Mask)
+		}
+		chain.Rules = append(chain.Rules, fmt.Sprintf("! -o %s -m mark --mark %s %s -j REJECT --reject-with icmp-port-unreachable",
+			guard.Interface, markSelector(guard.Mark, guard.Mask), owner))
+	}
+	return chain, nil
+}
+
+// markSelector renders a mark the way `iptables -S` prints it, so drift
+// detection compares equal strings: the mask is shown only when not full.
+func markSelector(mark, mask uint32) string {
+	if mask == ^uint32(0) {
+		return fmt.Sprintf("%#x", mark)
+	}
+	return fmt.Sprintf("%#x/%#x", mark, mask)
 }
 
 func canonicalPrefixes(raw []string) ([]string, error) {

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/alireza-attari/sakhtar-wg/internal/firewall"
 	kernelstate "github.com/alireza-attari/sakhtar-wg/internal/kernel"
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -279,10 +280,35 @@ func ownedEvidence(owned bool, evidence string) string {
 }
 
 func buildFirewallPlan(cfg *Config) ([]firewallPlanOperation, error) {
-	ruleset, err := compileGatewayRuleset(cfg)
+	guard, err := compileEgressGuardRuleset(cfg)
 	if err != nil {
 		return nil, err
 	}
+	gateway, err := compileGatewayRuleset(cfg)
+	if err != nil {
+		return nil, err
+	}
+	operations, err := planOwnedChains(guard, true)
+	if err != nil {
+		return nil, err
+	}
+	gatewayOperations, err := planOwnedChains(gateway, cfg.Gateway.Enabled)
+	if err != nil {
+		return nil, err
+	}
+	operations = append(operations, gatewayOperations...)
+	sort.Slice(operations, func(i, j int) bool {
+		if operations[i].Object == operations[j].Object {
+			return operations[i].Action < operations[j].Action
+		}
+		return operations[i].Object < operations[j].Object
+	})
+	return operations, nil
+}
+
+// planOwnedChains diffs the live owned chains against ruleset. wanted=false
+// plans their removal.
+func planOwnedChains(ruleset firewall.Ruleset, wanted bool) ([]firewallPlanOperation, error) {
 	inspections, err := inspectFirewallOwnership(ruleset)
 	if err != nil {
 		return nil, err
@@ -302,11 +328,11 @@ func buildFirewallPlan(cfg *Config) ([]firewallPlanOperation, error) {
 					currentRules[canonicalFirewallRule(strings.TrimPrefix(line, prefix))] = struct{}{}
 				}
 			}
-		} else if cfg.Gateway.Enabled {
+		} else if wanted {
 			operations = append(operations, firewallPlanOperation{Action: "add", Object: inspection.Chain.Table + "/" + inspection.Chain.Name})
 		}
 		desiredRules := map[string]struct{}{}
-		if cfg.Gateway.Enabled {
+		if wanted {
 			for _, rule := range inspection.Chain.Rules {
 				desiredRules[canonicalFirewallRule(rule)] = struct{}{}
 			}
@@ -322,7 +348,7 @@ func buildFirewallPlan(cfg *Config) ([]firewallPlanOperation, error) {
 			}
 		}
 		wantJump := 0
-		if cfg.Gateway.Enabled {
+		if wanted {
 			wantJump = 1
 		}
 		for i := inspection.OwnedJumps; i < wantJump; i++ {
@@ -331,16 +357,10 @@ func buildFirewallPlan(cfg *Config) ([]firewallPlanOperation, error) {
 		for i := wantJump; i < inspection.OwnedJumps; i++ {
 			operations = append(operations, firewallPlanOperation{Action: "delete", Object: inspection.Chain.Table + "/" + inspection.Chain.Hook + "/owned-jump"})
 		}
-		if !cfg.Gateway.Enabled && inspection.Exists {
+		if !wanted && inspection.Exists {
 			operations = append(operations, firewallPlanOperation{Action: "delete", Object: inspection.Chain.Table + "/" + inspection.Chain.Name})
 		}
 	}
-	sort.Slice(operations, func(i, j int) bool {
-		if operations[i].Object == operations[j].Object {
-			return operations[i].Action < operations[j].Action
-		}
-		return operations[i].Object < operations[j].Object
-	})
 	return operations, nil
 }
 

@@ -92,6 +92,9 @@ func pendingChanges(wg wireGuardConfigurer, cfg *Config) (changes []string, bloc
 // so a live tunnel is not re-handshaken.
 func reapplyOwnedState(wg wireGuardConfigurer, cfg *Config) error {
 	var errs []error
+	if err := egressGuardUp(cfg); err != nil {
+		errs = append(errs, err)
+	}
 	for _, t := range cfg.Tunnels {
 		link, found, err := lookupLink(t.Name)
 		switch {

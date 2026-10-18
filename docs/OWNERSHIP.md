@@ -29,9 +29,10 @@ systemd-networkd also deletes every policy rule it did not create each time it
 starts, and a package upgrade restarts it. On a host running networkd, install
 [`contrib/networkd.conf.d/10-sakhtar-wg.conf`](../contrib/networkd.conf.d/10-sakhtar-wg.conf)
 as `/etc/systemd/networkd.conf.d/10-sakhtar-wg.conf`
-(`ManageForeignRoutingPolicyRules=no`). Without it, marked traffic falls back to
-the main table and egresses via the WAN until the daemon's next kernel check
-puts the rules back (at most 30 seconds).
+(`ManageForeignRoutingPolicyRules=no`). Without it, marked traffic has no
+route to its tunnel until the daemon's next kernel check puts the rules back (at
+most 30 seconds). The egress guard below makes that window fail closed instead
+of egressing via the WAN.
 
 The running daemon compares the kernel and firewall with its configuration
 every 30 seconds and reapplies owned state that has gone missing, without
@@ -74,6 +75,31 @@ cannot widen the policy. `iptables-restore --noflush` flushes and
 repopulates only the dedicated chains, so reload drops stale owned rules while
 foreign tables/chains/rules remain intact. A reserved chain containing any
 uncommented rule or a foreign built-in jump is never changed or removed.
+
+## Egress guard
+
+`filter/SAKHTAR_WG_OUTPUT`, jumped to from the top of `OUTPUT`, holds one rule
+per tunnel, installed whether or not the gateway is enabled:
+
+```
+-o lo -j RETURN
+! -o <tunnel> -m mark --mark <fwmark>[/<mask>] -j REJECT --reject-with icmp-port-unreachable
+```
+
+A tunnel mark reaches its tunnel only through the policy rule and the route in
+the tunnel's table. If either is missing, or the link is gone, the lookup falls
+through to the main table and the packet would leave the WAN, and a probe would
+still pass. The guard matches the interface the kernel already chose, so it
+is inert while routing is intact. When routing is broken it refuses the
+connection at once (TCP `ECONNREFUSED`, UDP `EPERM`). The probe then fails and
+the connection moves to the next group member. It lives in iptables rather than
+in another policy rule or route on purpose: systemd-networkd flushes every
+foreign rule together, so a fallback rule would vanish with the rule it guards.
+Unmarked traffic (`direct`, the box's own egress, WireGuard's encrypted UDP) and
+the forwarded gateway path never reach these rules. WireGuard devices carry no
+firewall mark, and a test keeps it that way. The guard is installed before the
+first tunnel, is updated before a reload starts using a new mark, is checked by
+the 30-second kernel watchdog, and is removed last on shutdown.
 
 ## Sysctls
 
