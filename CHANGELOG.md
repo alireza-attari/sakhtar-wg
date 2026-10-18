@@ -28,9 +28,31 @@ versions follow Semantic Versioning.
   dialed through the IPv4-only tunnels.
 - Active probes no longer reuse pooled connections, so every probe tests a
   fresh DNS lookup and dial through its tunnel.
+- A tunnel DNS query that times out over UDP is retried over TCP to the same
+  resolver within the remaining `dns_resolver_timeout`. A path that drops most
+  UDP to the resolver no longer takes the tunnel's DNS down. Tunnel lookups ask
+  for A records only.
+- `dns_max_pending` now applies per egress. One tunnel whose resolver
+  blackholes can no longer fill the shared cap and fail uncached lookups on
+  every egress.
+- A connection routes with the router current when it dials, not the one from
+  when it was accepted, so a reload during the client's handshake cannot send
+  it out a removed tunnel's mark (and so the WAN).
+- A reload keeps the probe history of tunnels whose configuration did not
+  change, so a tunnel failing its probe is not eligible again right after it.
+- A route refresh queued during a reload no longer re-applies the pre-reload
+  config. The pfSense push runs without the updater lock and is bounded to
+  60s, so a stalled pfSense can no longer wedge the main loop.
+- Route-source fetches close their idle connection when they return.
 
 ### Added
 
+- `proxy.resolver` accepts a list of up to 4 resolvers, tried in order through
+  each tunnel. A single string still works. `tunnels[].resolver` overrides it
+  for one tunnel, and editing it on reload does not reconfigure the device.
+- A tunnel DNS answer made only of policy-denied addresses (wg0's relay hijacks
+  UDP/53 and answers 10.10.34.x) is retried over TCP and then on the next
+  listed resolver before the egress is given up.
 - `contrib/networkd.conf.d/10-sakhtar-wg.conf`, which stops systemd-networkd
   from deleting the daemon's policy rules when it restarts.
 
