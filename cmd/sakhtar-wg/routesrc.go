@@ -303,12 +303,7 @@ func (u *RouteUpdater) httpClient(base *Config, via string) *http.Client {
 	selector := &proxydial.RotatingSelector{Strategy: strategy, MaxAttempts: attemptCap}
 	destination := newDestinationPolicy(base)
 	noSelfAddresses := map[netip.Addr]struct{}{}
-	markedResolver := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, dnsNet, _ string) (net.Conn, error) {
-			return dialMarkedContext(ctx, dnsNet, resolver, mark, resolverTimeout)
-		},
-	}
+	markedResolver := newTunnelResolver(dialMarkedContext, []string{resolver}, mark, resolverTimeout)
 	tr := &http.Transport{
 		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: 15 * time.Second,

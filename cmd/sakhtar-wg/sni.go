@@ -130,14 +130,10 @@ func newRouterGeneration(c *Config, hm *HealthMonitor, generation uint64, dial f
 		0: &resolvercache.NetResolver{Resolver: net.DefaultResolver, LocalTTL: localTTL},
 	}
 	for _, tunnel := range c.Tunnels {
-		mark := tunnel.Fwmark
-		markedResolver := &net.Resolver{
-			PreferGo: true,
-			Dial: func(resolveCtx context.Context, network, _ string) (net.Conn, error) {
-				return dial(resolveCtx, network, resolverAddress, mark, resolverTimeout)
-			},
+		resolvers[tunnel.Fwmark] = &resolvercache.NetResolver{
+			Resolver: newTunnelResolver(dial, []string{resolverAddress}, tunnel.Fwmark, resolverTimeout),
+			LocalTTL: localTTL,
 		}
-		resolvers[mark] = &resolvercache.NetResolver{Resolver: markedResolver, LocalTTL: localTTL}
 	}
 	strategy := proxydial.AddressFamilyStrategy(c.Proxy.AddressFamilyStrategy)
 	if !strategy.Valid() {

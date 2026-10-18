@@ -2,24 +2,31 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"time"
 )
 
+// IPLookuper is the part of net.Resolver NetResolver uses, so a resolver with
+// its own transport policy can stand in for it.
+type IPLookuper interface {
+	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
+}
+
 // NetResolver adapts net.Resolver to the typed Resolver contract. net.Resolver
 // does not expose record TTLs, so LocalTTL is explicitly a local cache policy,
 // not an authoritative DNS TTL.
 type NetResolver struct {
-	Resolver *net.Resolver
+	Resolver IPLookuper
 	LocalTTL time.Duration
 	Clock    Clock
 }
 
 func (r *NetResolver) Resolve(ctx context.Context, query Query) (Result, error) {
-	resolver := r.Resolver
-	if resolver == nil {
-		resolver = net.DefaultResolver
+	var resolver IPLookuper = net.DefaultResolver
+	if r.Resolver != nil {
+		resolver = r.Resolver
 	}
 	network := "ip"
 	switch query.Family {
@@ -30,7 +37,7 @@ func (r *NetResolver) Resolve(ctx context.Context, query Query) (Result, error) 
 	}
 	addrs, err := resolver.LookupNetIP(ctx, network, query.Host)
 	if err != nil {
-		if dnsErr, ok := err.(*net.DNSError); ok && dnsErr.IsNotFound {
+		if dnsErr := (*net.DNSError)(nil); errors.As(err, &dnsErr) && dnsErr.IsNotFound {
 			return Result{RCode: RCodeNXDOMAIN}, nil
 		}
 		return Result{}, err
