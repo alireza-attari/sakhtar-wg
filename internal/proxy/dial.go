@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type AddressFamilyStrategy string
@@ -174,9 +175,28 @@ func (m *ConnectMetrics) Snapshot() map[string]uint64 {
 	return out
 }
 
+// minAttemptTimeout keeps a budget slice from dropping below one TCP SYN
+// retransmission timeout, which would fail a candidate whose first SYN was lost.
+var minAttemptTimeout = time.Second
+
+// attemptTimeout splits what is left of the budget evenly over the attempts
+// still to make, Happy-Eyeballs style: a blackholed candidate costs its slice
+// rather than the whole budget, and the last attempt gets everything left.
+func attemptTimeout(remaining time.Duration, attemptsLeft int) time.Duration {
+	if remaining <= 0 {
+		return 0
+	}
+	slice := remaining
+	if attemptsLeft > 1 {
+		slice = remaining / time.Duration(attemptsLeft)
+	}
+	return min(max(slice, minAttemptTimeout), remaining)
+}
+
 // DialCandidates retries only the already validated IP literals supplied by
-// the selector. The caller owns ctx's total deadline; no attempt receives a new
-// budget. The returned count is useful for bounded observability and tests.
+// the selector. The caller owns ctx's total deadline; each attempt gets a slice
+// of what remains of it (attemptTimeout) and never a new budget. The returned
+// count is useful for bounded observability and tests.
 func DialCandidates(ctx context.Context, candidates []netip.Addr, port string, attemptCap int, egress string, dial DialFunc, metrics *ConnectMetrics) (net.Conn, int, error) {
 	if attemptCap <= 0 {
 		return nil, 0, errors.New("proxy: connect attempt cap must be greater than zero")
@@ -196,7 +216,12 @@ func DialCandidates(ctx context.Context, candidates []netip.Addr, port string, a
 		}
 		address := net.JoinHostPort(candidate.String(), port)
 		attempts++
-		conn, err := dial(ctx, "tcp", address)
+		attemptCtx, cancel := ctx, context.CancelFunc(func() {})
+		if deadline, ok := ctx.Deadline(); ok {
+			attemptCtx, cancel = context.WithTimeout(ctx, attemptTimeout(time.Until(deadline), len(candidates)-i))
+		}
+		conn, err := dial(attemptCtx, "tcp", address)
+		cancel()
 		if err == nil {
 			if metrics != nil {
 				metrics.record(true, egress)

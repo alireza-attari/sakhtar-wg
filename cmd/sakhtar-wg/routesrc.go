@@ -323,13 +323,16 @@ func (u *RouteUpdater) httpClient(base *Config, via string) *http.Client {
 				return nil, err
 			}
 			if parsed, parseErr := netip.ParseAddr(host); parseErr == nil {
+				if !egressFamilyAllowed(parsed, mark) {
+					return nil, errNoIPv4Candidate
+				}
 				if !destination.addressAllowed(parsed, mark, noSelfAddresses) {
 					return nil, errDestinationDenied
 				}
 				return dialMarkedContext(ctx, network, addr, mark, fetchTimeout)
 			}
 			resolveCtx, cancel := context.WithTimeout(ctx, resolverTimeout)
-			addrs, err := markedResolver.LookupNetIP(resolveCtx, "ip", host)
+			addrs, err := markedResolver.LookupNetIP(resolveCtx, "ip4", host)
 			cancel()
 			if err != nil {
 				return nil, err

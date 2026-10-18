@@ -103,3 +103,66 @@ func BenchmarkResolveAndDial(b *testing.B) {
 		_ = peer.Close()
 	}
 }
+
+func TestAttemptTimeoutSlicesRemainingBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		remaining    time.Duration
+		attemptsLeft int
+		want         time.Duration
+	}{
+		{"even slice", 10 * time.Second, 4, 2500 * time.Millisecond},
+		{"last attempt takes the rest", 3 * time.Second, 1, 3 * time.Second},
+		{"slice floored at one SYN retransmission", 2 * time.Second, 4, time.Second},
+		{"floor never exceeds the budget", 400 * time.Millisecond, 4, 400 * time.Millisecond},
+		{"exhausted budget", 0, 3, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := attemptTimeout(tc.remaining, tc.attemptsLeft); got != tc.want {
+				t.Fatalf("attemptTimeout(%s, %d) = %s, want %s", tc.remaining, tc.attemptsLeft, got, tc.want)
+			}
+		})
+	}
+}
+
+// One blackholed candidate must not spend the whole dial budget: before the
+// slicing, a SYN into a dead path held the first attempt until the shared
+// deadline and the reachable second address was never tried.
+func TestBlackholedCandidateLeavesBudgetForTheNext(t *testing.T) {
+	previous := minAttemptTimeout
+	minAttemptTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { minAttemptTimeout = previous })
+
+	candidates := []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2")}
+	for _, tc := range []struct {
+		name      string
+		blackhole map[string]bool
+		wantErr   bool
+		attempts  int
+	}{
+		{"first blackholed, second answers", map[string]bool{"192.0.2.1:443": true}, false, 2},
+		{"both blackholed exhaust the budget", map[string]bool{"192.0.2.1:443": true, "192.0.2.2:443": true}, true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+			defer cancel()
+			var peer net.Conn
+			conn, attempts, err := DialCandidates(ctx, candidates, "443", 4, "wg0", func(attemptCtx context.Context, _, address string) (net.Conn, error) {
+				if tc.blackhole[address] {
+					<-attemptCtx.Done()
+					return nil, attemptCtx.Err()
+				}
+				client, server := net.Pipe()
+				peer = server
+				return client, nil
+			}, nil)
+			if (err != nil) != tc.wantErr || attempts != tc.attempts {
+				t.Fatalf("attempts = %d, err = %v; want attempts %d, error %t", attempts, err, tc.attempts, tc.wantErr)
+			}
+			if conn != nil {
+				_ = conn.Close()
+				_ = peer.Close()
+			}
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -475,6 +476,59 @@ func TestDeniedAnswerIsNotCached(t *testing.T) {
 				candidates, err := srv.backendCandidates(context.Background(), "www.youtube.com", false, mark, rt, map[netip.Addr]struct{}{})
 				if denied := errors.Is(err, errDestinationDenied); denied != tc.wantDenied {
 					t.Fatalf("candidates = %v, err = %v; denied = %t, want %t", candidates, err, denied, tc.wantDenied)
+				}
+			}
+			if got := resolves.Load(); got != tc.wantResolve {
+				t.Fatalf("resolves = %d, want %d", got, tc.wantResolve)
+			}
+		})
+	}
+}
+
+// The tunnels are IPv4-only, so an IPv6 candidate on a marked egress can only
+// burn a budget slice. Direct egress keeps both families.
+func TestMarkedEgressDialsIPv4Only(t *testing.T) {
+	const mark = 0x99
+	for _, tc := range []struct {
+		name        string
+		mark        int
+		host        string
+		isIP        bool
+		answer      []string
+		want        []string
+		wantErr     error
+		wantResolve int32
+	}{
+		{name: "marked keeps only IPv4", mark: mark, host: "dual.example", answer: []string{"2606:4700::1", "93.184.216.34"}, want: []string{"93.184.216.34"}, wantResolve: 1},
+		{name: "marked IPv6-only answer stays cached", mark: mark, host: "v6.example", answer: []string{"2606:4700::1"}, wantErr: errNoIPv4Candidate, wantResolve: 1},
+		{name: "marked IPv6 literal", mark: mark, host: "2606:4700::1", isIP: true, wantErr: errNoIPv4Candidate},
+		{name: "direct keeps IPv6", mark: 0, host: "v6.example", answer: []string{"2606:4700::1"}, want: []string{"2606:4700::1"}, wantResolve: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testProxyConfig(4, 0)
+			cfg.Tunnels = []Tunnel{{Name: "wg0", Fwmark: mark}}
+			srv := NewServer(cfg, nil)
+			rt := srv.rt.Load()
+			var resolves atomic.Int32
+			rt.resolvers[tc.mark] = resolvercache.ResolverFunc(func(context.Context, resolvercache.Query) (resolvercache.Result, error) {
+				resolves.Add(1)
+				addrs := make([]netip.Addr, 0, len(tc.answer))
+				for _, raw := range tc.answer {
+					addrs = append(addrs, netip.MustParseAddr(raw))
+				}
+				return resolvercache.Result{Addrs: addrs, ExpiresAt: time.Now().Add(5 * time.Minute), RCode: resolvercache.RCodeSuccess}, nil
+			})
+			for range 2 {
+				candidates, err := srv.backendCandidates(context.Background(), tc.host, tc.isIP, tc.mark, rt, map[netip.Addr]struct{}{})
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tc.wantErr)
+				}
+				got := make([]string, 0, len(candidates))
+				for _, candidate := range candidates {
+					got = append(got, candidate.String())
+				}
+				if !slices.Equal(got, tc.want) {
+					t.Fatalf("candidates = %v, want %v", got, tc.want)
 				}
 			}
 			if got := resolves.Load(); got != tc.wantResolve {

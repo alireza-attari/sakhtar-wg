@@ -34,6 +34,28 @@ var errDestinationDenied = errors.New("destination denied by policy")
 // failure of that egress's resolver, not a verdict on the destination.
 var errDeniedAnswer = fmt.Errorf("%w: resolver answered only denied addresses", errDestinationDenied)
 
+var errNoIPv4Candidate = errors.New("tunnel egress is IPv4-only and the destination has no IPv4 address")
+
+// egressFamilyAllowed drops IPv6 on a marked egress. The tunnels carry IPv4
+// only (an IPv4 default route in each mark's table and an IPv4 policy rule), so
+// an IPv6 attempt through one cannot succeed and only spends dial budget.
+func egressFamilyAllowed(addr netip.Addr, mark int) bool {
+	return mark == 0 || addr.Unmap().Is4()
+}
+
+func egressFamilyCandidates(addrs []netip.Addr, mark int) []netip.Addr {
+	if mark == 0 {
+		return addrs
+	}
+	kept := make([]netip.Addr, 0, len(addrs))
+	for _, addr := range addrs {
+		if egressFamilyAllowed(addr, mark) {
+			kept = append(kept, addr)
+		}
+	}
+	return kept
+}
+
 type router struct {
 	def                     markRef
 	dialTimeout             time.Duration
@@ -507,6 +529,9 @@ func (s *Server) backendCandidates(ctx context.Context, host string, isIP bool, 
 		if err != nil {
 			return nil, errDestinationDenied
 		}
+		if !egressFamilyAllowed(addr, mark) {
+			return nil, errNoIPv4Candidate
+		}
 		selected := rt.selector.Select([]netip.Addr{addr}, func(candidate netip.Addr) bool {
 			return rt.destination.addressAllowed(candidate, mark, self)
 		})
@@ -526,7 +551,13 @@ func (s *Server) backendCandidates(ctx context.Context, host string, isIP bool, 
 	if result.RCode != resolvercache.RCodeSuccess {
 		return nil, fmt.Errorf("DNS %s for %s", result.RCode, host)
 	}
-	allowed := rt.selector.Select(result.Addrs, func(candidate netip.Addr) bool {
+	// An IPv6-only answer is correct, just unusable here: it is not poisoned
+	// and must not be invalidated as if it were.
+	family := egressFamilyCandidates(result.Addrs, mark)
+	if len(family) == 0 {
+		return nil, errNoIPv4Candidate
+	}
+	allowed := rt.selector.Select(family, func(candidate netip.Addr) bool {
 		return rt.destination.addressAllowed(candidate, mark, self)
 	})
 	if len(allowed) == 0 {
